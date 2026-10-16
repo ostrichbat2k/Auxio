@@ -1,0 +1,119 @@
+/*
+ * Copyright (c) 2026 Auxio Project
+ * IsoToneTest.kt is part of Auxio.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+package org.oxycblt.auxio.usb
+
+import kotlin.math.PI
+import kotlin.math.sin
+import timber.log.Timber as L
+
+/**
+ * Generates a continuous sine tone and streams it directly to a USB Audio Class isochronous OUT
+ * endpoint via raw URB submission (see UsbNative), bypassing Android's entire audio stack --
+ * AudioTrack, the mixer, everything. Proof of concept for direct USB output: if this is audible,
+ * bit-perfect playback works end to end at the protocol level.
+ */
+object IsoToneTest {
+    private const val PACKETS_PER_URB = 8
+    private const val NUM_URBS = 4
+    private const val FREQUENCY_HZ = 440.0
+    private const val CHANNELS = 2
+    private const val AMPLITUDE = 0.2 // quiet on purpose, this goes straight into someone's ears
+
+    /** Plays a sine tone for [durationMs] at [sampleRateHz] using [format]'s packet/bit layout. */
+    fun play(session: UsbAudioSession, format: UacStreamFormat, sampleRateHz: Int, durationMs: Long) {
+        val bytesPerSample = format.subslotSize
+        val bytesPerFrame = CHANNELS * bytesPerSample
+        val samplesPerPacket = sampleRateHz / 1000
+        val packetBytes = samplesPerPacket * bytesPerFrame
+        if (packetBytes != format.maxPacketSize || sampleRateHz % 1000 != 0) {
+            L.w(
+                "Packet size mismatch for $sampleRateHz Hz (computed $packetBytes, " +
+                    "endpoint expects ${format.maxPacketSize}); aborting tone test")
+            return
+        }
+        val urbBytes = packetBytes * PACKETS_PER_URB
+
+        val fd = session.connection.fileDescriptor
+        val handle =
+            UsbNative.openIsoStream(fd, format.endpointAddress, format.maxPacketSize, PACKETS_PER_URB, NUM_URBS)
+        if (handle == 0L) {
+            L.w("Failed to open iso stream")
+            return
+        }
+
+        var phase = 0.0
+        val phaseStep = 2.0 * PI * FREQUENCY_HZ / sampleRateHz
+        val peak = maxAmplitudeFor(bytesPerSample)
+
+        fun nextChunk(): ByteArray {
+            val buf = ByteArray(urbBytes)
+            var offset = 0
+            repeat(urbBytes / bytesPerFrame) {
+                val value = (sin(phase) * AMPLITUDE * peak).toInt()
+                phase += phaseStep
+                if (phase > 2.0 * PI) phase -= 2.0 * PI
+                repeat(CHANNELS) {
+                    writeSample(buf, offset, value, bytesPerSample)
+                    offset += bytesPerSample
+                }
+            }
+            return buf
+        }
+
+        L.i("Starting iso tone test: $sampleRateHz Hz, ${format.bitResolution}-bit, $durationMs ms")
+        try {
+            for (slot in 0 until NUM_URBS) {
+                UsbNative.submitIso(handle, slot, nextChunk(), urbBytes)
+            }
+
+            val deadline = System.currentTimeMillis() + durationMs
+            var submitted = 0
+            var errors = 0
+            while (System.currentTimeMillis() < deadline) {
+                val slot = UsbNative.reapIso(handle)
+                if (slot < 0) {
+                    errors++
+                    if (errors > 10) {
+                        L.w("Too many reap errors, stopping tone test early")
+                        break
+                    }
+                    continue
+                }
+                UsbNative.submitIso(handle, slot, nextChunk(), urbBytes)
+                submitted++
+            }
+            L.i("Iso tone test done: $submitted URBs submitted, $errors reap errors")
+        } finally {
+            UsbNative.closeIsoStream(handle)
+        }
+    }
+
+    private fun maxAmplitudeFor(bytesPerSample: Int): Double =
+        when (bytesPerSample) {
+            2 -> 32767.0
+            3 -> 8388607.0
+            else -> 127.0
+        }
+
+    private fun writeSample(buf: ByteArray, offset: Int, value: Int, bytesPerSample: Int) {
+        for (b in 0 until bytesPerSample) {
+            buf[offset + b] = ((value shr (8 * b)) and 0xFF).toByte()
+        }
+    }
+}

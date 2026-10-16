@@ -35,5 +35,7 @@ data class UacPlaybackTopology(
     val controlInterfaceNumber: Int,
     val streamingInterfaceNumber: Int,
     val clockSourceId: Int,
+    /** The Feature Unit gating the physical output (mute/volume), or -1 if none was found. */
+    val outputFeatureUnitId: Int,
     val formats: List<UacStreamFormat>,
 )

@@ -30,4 +30,26 @@ object UsbNative {
 
     /** Evicts whatever kernel driver is bound to [interfaceNumber] on [fd], without claiming it. */
     external fun disconnectKernelDriver(fd: Int, interfaceNumber: Int): Boolean
+
+    /**
+     * Allocates [numUrbs] isochronous URBs of [packetsPerUrb] packets each (every packet
+     * [maxPacketSize] bytes) for [endpointAddress] on [fd]. Returns an opaque native handle, or 0
+     * on failure.
+     */
+    external fun openIsoStream(
+        fd: Int,
+        endpointAddress: Int,
+        maxPacketSize: Int,
+        packetsPerUrb: Int,
+        numUrbs: Int,
+    ): Long
+
+    /** Fills URB [slot] with [length] bytes of [data] (zero-padded if shorter) and submits it. */
+    external fun submitIso(handle: Long, slot: Int, data: ByteArray, length: Int): Boolean
+
+    /** Blocks until a submitted URB completes; returns its slot index, or -1 on error/cancel. */
+    external fun reapIso(handle: Long): Int
+
+    /** Cancels all outstanding URBs and frees the stream. */
+    external fun closeIsoStream(handle: Long)
 }

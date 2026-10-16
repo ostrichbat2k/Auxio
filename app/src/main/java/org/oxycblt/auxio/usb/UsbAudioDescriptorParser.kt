@@ -47,6 +47,7 @@ object UsbAudioDescriptorParser {
     // AudioControl class-specific interface descriptor subtypes (UAC 3.0). These differ from
     // UAC 1.0/2.0's subtype numbers (e.g. FEATURE_UNIT is 6 in UAC2 but 7 in UAC3).
     private const val AC_INPUT_TERMINAL = 0x02
+    private const val AC_OUTPUT_TERMINAL = 0x03
     private const val AC_CLOCK_SOURCE = 0x0B
 
     // AudioStreaming class-specific interface descriptor subtype (UAC 3.0). Unlike UAC 1.0/2.0,
@@ -117,6 +118,7 @@ object UsbAudioDescriptorParser {
         var streamingInterfaceNumber = -1
         var clockSourceId = -1
         var usbStreamingTerminalId = -1
+        var outputFeatureUnitId = -1
 
         val formatsByInterface = mutableMapOf<Int, MutableList<UacStreamFormat>>()
         var pendingAltSetting = -1
@@ -184,6 +186,15 @@ object UsbAudioDescriptorParser {
                             AC_CLOCK_SOURCE -> {
                                 if (clockSourceId < 0) clockSourceId = bytes.u8(3)
                             }
+                            AC_OUTPUT_TERMINAL -> {
+                                val terminalType = bytes.u16(4)
+                                // The real-world (non-USB-Streaming) output terminal's source is
+                                // the last Feature Unit before the physical jack -- the one whose
+                                // mute/volume state actually gates what's audible.
+                                if (terminalType != TERMINAL_USB_STREAMING && outputFeatureUnitId < 0) {
+                                    outputFeatureUnitId = bytes.u8(7) // bSourceID
+                                }
+                            }
                         }
                     } else if (currentInterfaceSubClass == AS_SUBCLASS &&
                         currentInterfaceProtocol == UAC3_PROTOCOL &&
@@ -227,6 +238,7 @@ object UsbAudioDescriptorParser {
             controlInterfaceNumber = controlInterfaceNumber,
             streamingInterfaceNumber = streamingInterfaceNumber,
             clockSourceId = clockSourceId,
+            outputFeatureUnitId = outputFeatureUnitId,
             formats = formats)
     }
 }

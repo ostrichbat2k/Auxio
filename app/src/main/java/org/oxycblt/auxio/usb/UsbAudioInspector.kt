@@ -58,18 +58,35 @@ object UsbAudioInspector {
         val found = topology ?: return
         val session = UsbAudioController.activate(context, device, found) ?: return
         try {
-            val currentHz = UsbAudioController.getClockFrequency(session)
-            L.i("Phase 3 probe: clock source reports ${currentHz ?: "unreadable"} Hz before any change")
-            if (currentHz != null) {
-                val targetHz = if (currentHz == 44100) 48000 else 44100
-                val wrote = UsbAudioController.setClockFrequency(session, targetHz)
-                L.i("Phase 3 probe: set clock to $targetHz Hz -> $wrote")
-                // Restore the original rate so we don't leave the device in an unexpected state.
-                UsbAudioController.setClockFrequency(session, currentHz)
+            val sampleRateHz = 48000
+            val setClock = UsbAudioController.setClockFrequency(session, sampleRateHz)
+            L.i("Phase 4 probe: set clock to $sampleRateHz Hz -> $setClock")
+
+            // The signal path runs Input Terminal -> Mixer -> Feature Unit (mute/volume) ->
+            // Output Terminal. A clean, error-free USB transfer still produces silence if this
+            // is muted or near its floor -- likely state left over from whatever the system
+            // audio HAL had set before we evicted its driver.
+            val muted = UsbAudioController.getMute(session)
+            L.i("Phase 4 probe: output feature unit mute=$muted")
+            if (muted != false) {
+                UsbAudioController.setMute(session, muted = false)
             }
-            val selected = found.formats.maxByOrNull { it.bitResolution }
-            if (selected != null) {
-                UsbAudioController.selectFormat(session, selected)
+            for (channel in 1..2) {
+                val volume = UsbAudioController.getVolume(session, channel)
+                L.i("Phase 4 probe: channel $channel volume=$volume (1/256 dB, 0=unity)")
+                if (volume == null || volume < 0) {
+                    UsbAudioController.setVolume(session, value = 0, channel = channel)
+                }
+            }
+
+            // Prefer the 16-bit format: at 48kHz its packet size (192B) matches what the tone
+            // test computes from samples/ms directly, same as 24-bit's 288B -- either works, 16
+            // is just less data to push while proving the pipeline out.
+            val selected = found.formats.minByOrNull { it.bitResolution }
+            if (selected != null && setClock && UsbAudioController.selectFormat(session, selected)) {
+                IsoToneTest.play(session, selected, sampleRateHz, durationMs = 3000)
+            } else {
+                L.w("Skipping tone test: clock/format setup did not succeed")
             }
         } finally {
             UsbAudioController.release(session)

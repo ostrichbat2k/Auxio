@@ -25,9 +25,17 @@
 // This shim issues the disconnect ioctl directly, without ever claiming the interface,
 // leaving it in the "no driver bound, nothing claimed" state that proc_setconfig requires.
 
+#include <android/log.h>
+#include <cerrno>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <jni.h>
 #include <linux/usbdevice_fs.h>
 #include <sys/ioctl.h>
+
+#define LOG_TAG "UsbNative"
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_org_oxycblt_auxio_usb_UsbNative_disconnectKernelDriver(
@@ -38,4 +46,144 @@ Java_org_oxycblt_auxio_usb_UsbNative_disconnectKernelDriver(
     ctl.data = nullptr;
     int ret = ioctl(fd, USBDEVFS_IOCTL, &ctl);
     return ret == 0 ? JNI_TRUE : JNI_FALSE;
+}
+
+// ---------------------------------------------------------------------------
+// Isochronous streaming.
+//
+// android.hardware.usb.UsbRequest -- the only async USB I/O class the public API
+// exposes -- rejects isochronous endpoints outright (see usb_request_new() in AOSP's
+// system/core/libusbhost/usbhost.c: anything that isn't USB_ENDPOINT_XFER_BULK or
+// _INTERRUPT returns NULL). There is no public API path for isochronous transfers at
+// all, so this submits/reaps USBDEVFS_URB_TYPE_ISO urbs directly via ioctl, built from
+// the same uapi struct layout the kernel itself uses (linux/usbdevice_fs.h).
+//
+// This device streams in *synchronous* isochronous mode (its clock is locked to USB's
+// own SOF timing, confirmed via descriptor parsing), so every packet is exactly
+// wMaxPacketSize bytes -- no per-packet size variation for clock-drift compensation is
+// needed, unlike asynchronous/adaptive mode.
+
+struct IsoStream {
+    int fd;
+    unsigned char endpoint;
+    int packetsPerUrb;
+    int numUrbs;
+    unsigned int bufferLength;
+    struct usbdevfs_urb** urbs;
+};
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_org_oxycblt_auxio_usb_UsbNative_openIsoStream(
+        JNIEnv* /*env*/, jobject /*thiz*/, jint fd, jint endpointAddress, jint maxPacketSize,
+        jint packetsPerUrb, jint numUrbs) {
+    auto* stream = new IsoStream();
+    stream->fd = fd;
+    stream->endpoint = (unsigned char) endpointAddress;
+    stream->packetsPerUrb = packetsPerUrb;
+    stream->numUrbs = numUrbs;
+    stream->bufferLength = (unsigned int) (packetsPerUrb * maxPacketSize);
+    stream->urbs = new struct usbdevfs_urb*[numUrbs];
+
+    size_t urbSize = sizeof(struct usbdevfs_urb) +
+            (size_t) packetsPerUrb * sizeof(struct usbdevfs_iso_packet_desc);
+
+    for (int i = 0; i < numUrbs; i++) {
+        auto* urb = (struct usbdevfs_urb*) calloc(1, urbSize);
+        void* buffer = urb ? malloc(stream->bufferLength) : nullptr;
+        if (!urb || !buffer) {
+            LOGE("Failed to allocate urb/buffer %d", i);
+            free(urb);
+            free(buffer);
+            for (int j = 0; j < i; j++) {
+                free(stream->urbs[j]->buffer);
+                free(stream->urbs[j]);
+            }
+            delete[] stream->urbs;
+            delete stream;
+            return 0;
+        }
+        memset(buffer, 0, stream->bufferLength);
+        urb->type = USBDEVFS_URB_TYPE_ISO;
+        urb->endpoint = stream->endpoint;
+        urb->flags = USBDEVFS_URB_ISO_ASAP;
+        urb->buffer = buffer;
+        urb->buffer_length = (int) stream->bufferLength;
+        urb->number_of_packets = packetsPerUrb;
+        urb->usercontext = (void*) (intptr_t) i;
+        for (int p = 0; p < packetsPerUrb; p++) {
+            urb->iso_frame_desc[p].length = (unsigned int) maxPacketSize;
+        }
+        stream->urbs[i] = urb;
+    }
+
+    return (jlong) (intptr_t) stream;
+}
+
+// Fills URB [slot] with [length] bytes from [data] (zero-padded if shorter than the
+// URB's buffer) and submits it. Returns false if the submission itself fails; a
+// successful submission still needs to be reaped later to find out how it went.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_oxycblt_auxio_usb_UsbNative_submitIso(
+        JNIEnv* env, jobject /*thiz*/, jlong handle, jint slot, jbyteArray data, jint length) {
+    auto* stream = (IsoStream*) (intptr_t) handle;
+    if (!stream || slot < 0 || slot >= stream->numUrbs) return JNI_FALSE;
+    struct usbdevfs_urb* urb = stream->urbs[slot];
+
+    int bufCap = urb->buffer_length;
+    int toCopy = length < bufCap ? length : bufCap;
+    if (toCopy > 0) {
+        env->GetByteArrayRegion(data, 0, toCopy, (jbyte*) urb->buffer);
+    }
+    if (toCopy < bufCap) {
+        memset((char*) urb->buffer + toCopy, 0, bufCap - toCopy);
+    }
+
+    urb->status = -1;
+    urb->actual_length = 0;
+    int ret = ioctl(stream->fd, USBDEVFS_SUBMITURB, urb);
+    if (ret != 0) {
+        LOGE("SUBMITURB failed for slot %d: errno=%d", slot, errno);
+        return JNI_FALSE;
+    }
+    return JNI_TRUE;
+}
+
+// Blocks until a submitted URB completes (or is cancelled by closeIsoStream from another
+// thread), returning its slot index so the caller can refill and resubmit it. Returns -1
+// on error/cancellation.
+extern "C" JNIEXPORT jint JNICALL
+Java_org_oxycblt_auxio_usb_UsbNative_reapIso(JNIEnv* /*env*/, jobject /*thiz*/, jlong handle) {
+    auto* stream = (IsoStream*) (intptr_t) handle;
+    if (!stream) return -1;
+
+    struct usbdevfs_urb* reaped = nullptr;
+    int ret = ioctl(stream->fd, USBDEVFS_REAPURB, &reaped);
+    if (ret != 0 || !reaped) {
+        return -1;
+    }
+    if (reaped->status != 0) {
+        LOGE("Reaped urb slot %ld with status=%d actual_length=%d",
+             (long) (intptr_t) reaped->usercontext, reaped->status, reaped->actual_length);
+    }
+    return (jint) (intptr_t) reaped->usercontext;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_oxycblt_auxio_usb_UsbNative_closeIsoStream(JNIEnv* /*env*/, jobject /*thiz*/, jlong handle) {
+    auto* stream = (IsoStream*) (intptr_t) handle;
+    if (!stream) return;
+
+    for (int i = 0; i < stream->numUrbs; i++) {
+        ioctl(stream->fd, USBDEVFS_DISCARDURB, stream->urbs[i]);
+    }
+    struct usbdevfs_urb* reaped = nullptr;
+    while (ioctl(stream->fd, USBDEVFS_REAPURBNDELAY, &reaped) == 0) {
+        // Drain whatever the kernel still has queued so it can free its own bookkeeping.
+    }
+    for (int i = 0; i < stream->numUrbs; i++) {
+        free(stream->urbs[i]->buffer);
+        free(stream->urbs[i]);
+    }
+    delete[] stream->urbs;
+    delete stream;
 }

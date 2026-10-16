@@ -145,7 +145,14 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
             val wasPermitted = knownPermissions[audioDevice.device.deviceName] ?: false
             if (audioDevice.hasPermission && !wasPermitted) {
                 L.i("Permission newly granted for ${audioDevice.displayName}, inspecting")
-                UsbAudioInspector.inspect(context, audioDevice.device)
+                // Inspection now includes a multi-second blocking tone-test loop (Phase 4); keep
+                // it off whatever thread refresh() was called on (the broadcast receiver's,
+                // normally the main thread).
+                Thread { UsbAudioInspector.inspect(context, audioDevice.device) }
+                    .apply {
+                        isDaemon = true
+                        start()
+                    }
             }
         }
         knownPermissions = found.associate { it.device.deviceName to it.hasPermission }

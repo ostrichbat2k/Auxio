@@ -50,6 +50,8 @@ object UsbAudioController {
     private const val REQ_TYPE_CLASS_INTERFACE_SET = 0x21 // Host-to-device, Class, Interface
     private const val UAC_REQUEST_CUR = 0x01
     private const val CS_SAM_FREQ_CONTROL = 0x01
+    private const val FU_MUTE_CONTROL = 0x01
+    private const val FU_VOLUME_CONTROL = 0x02
 
     /** Opens, configures, and claims the interfaces for [device]'s UAC3 playback topology. */
     fun activate(context: Context, device: UsbDevice, topology: UacPlaybackTopology): UsbAudioSession? {
@@ -179,6 +181,69 @@ object UsbAudioController {
         val ok = readBack == hz
         L.i("SET_CUR clock frequency to $hz Hz: write result=$result, readback=$readBack, match=$ok")
         return ok
+    }
+
+    /** Reads the Feature Unit's mute state for [channel] (0=master, 1=left, 2=right), or null. */
+    fun getMute(session: UsbAudioSession, channel: Int = 0): Boolean? {
+        val unitId = session.topology.outputFeatureUnitId
+        if (unitId < 0) return null
+        val buffer = ByteArray(1)
+        val wValue = (FU_MUTE_CONTROL shl 8) or channel
+        val wIndex = (unitId shl 8) or session.controlInterface.id
+        val result =
+            session.connection.controlTransfer(
+                REQ_TYPE_CLASS_INTERFACE_GET, UAC_REQUEST_CUR, wValue, wIndex, buffer, buffer.size, 1000)
+        if (result != 1) {
+            L.w("GET_CUR mute (unit=$unitId ch=$channel) failed: result=$result")
+            return null
+        }
+        return buffer[0].toInt() != 0
+    }
+
+    /** Sets the Feature Unit's mute state for [channel] (0=master, 1=left, 2=right). */
+    fun setMute(session: UsbAudioSession, muted: Boolean, channel: Int = 0): Boolean {
+        val unitId = session.topology.outputFeatureUnitId
+        if (unitId < 0) return false
+        val wValue = (FU_MUTE_CONTROL shl 8) or channel
+        val wIndex = (unitId shl 8) or session.controlInterface.id
+        val buffer = byteArrayOf(if (muted) 1 else 0)
+        val result =
+            session.connection.controlTransfer(
+                REQ_TYPE_CLASS_INTERFACE_SET, UAC_REQUEST_CUR, wValue, wIndex, buffer, buffer.size, 1000)
+        L.i("SET_CUR mute (unit=$unitId ch=$channel) to $muted: result=$result")
+        return result >= 0
+    }
+
+    /** Reads the Feature Unit's volume for [channel] (0=master, 1=left, 2=right), in 1/256 dB. */
+    fun getVolume(session: UsbAudioSession, channel: Int): Int? {
+        val unitId = session.topology.outputFeatureUnitId
+        if (unitId < 0) return null
+        val buffer = ByteArray(2)
+        val wValue = (FU_VOLUME_CONTROL shl 8) or channel
+        val wIndex = (unitId shl 8) or session.controlInterface.id
+        val result =
+            session.connection.controlTransfer(
+                REQ_TYPE_CLASS_INTERFACE_GET, UAC_REQUEST_CUR, wValue, wIndex, buffer, buffer.size, 1000)
+        if (result != 2) {
+            L.w("GET_CUR volume (unit=$unitId ch=$channel) failed: result=$result")
+            return null
+        }
+        // Signed 16-bit, 1/256 dB units (0x0000 = 0dB).
+        return (buffer[0].toInt() and 0xFF) or (buffer[1].toInt() shl 8)
+    }
+
+    /** Sets the Feature Unit's volume for [channel] (0=master, 1=left, 2=right), in 1/256 dB. */
+    fun setVolume(session: UsbAudioSession, value: Int, channel: Int): Boolean {
+        val unitId = session.topology.outputFeatureUnitId
+        if (unitId < 0) return false
+        val wValue = (FU_VOLUME_CONTROL shl 8) or channel
+        val wIndex = (unitId shl 8) or session.controlInterface.id
+        val buffer = byteArrayOf((value and 0xFF).toByte(), ((value shr 8) and 0xFF).toByte())
+        val result =
+            session.connection.controlTransfer(
+                REQ_TYPE_CLASS_INTERFACE_SET, UAC_REQUEST_CUR, wValue, wIndex, buffer, buffer.size, 1000)
+        L.i("SET_CUR volume (unit=$unitId ch=$channel) to $value: result=$result")
+        return result >= 0
     }
 
     /** Switches the streaming interface to the alternate setting for [format]. */
