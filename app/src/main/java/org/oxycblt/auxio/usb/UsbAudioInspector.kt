@@ -36,23 +36,43 @@ object UsbAudioInspector {
             L.w("Could not open USB connection to ${device.deviceName}")
             return
         }
+        var topology: UacPlaybackTopology? = null
         try {
             val configCount = device.configurationCount.coerceAtLeast(1)
             L.i("Inspecting ${device.productName ?: device.deviceName}: $configCount configuration(s)")
-            var found = false
             for (i in 0 until configCount) {
                 val bytes = UsbAudioDescriptorParser.fetchConfigurationDescriptor(connection, i) ?: continue
-                val topology = UsbAudioDescriptorParser.parseUac3Playback(bytes)
-                if (topology != null) {
-                    found = true
-                    L.i("Config index $i: UAC3 playback topology = $topology")
+                val found = UsbAudioDescriptorParser.parseUac3Playback(bytes)
+                if (found != null) {
+                    topology = found
+                    L.i("Config index $i: UAC3 playback topology = $found")
                 }
             }
-            if (!found) {
+            if (topology == null) {
                 L.i("No UAC3 (full, non-BADD) playback configuration found on this device.")
             }
         } finally {
             connection.close()
+        }
+
+        val found = topology ?: return
+        val session = UsbAudioController.activate(context, device, found) ?: return
+        try {
+            val currentHz = UsbAudioController.getClockFrequency(session)
+            L.i("Phase 3 probe: clock source reports ${currentHz ?: "unreadable"} Hz before any change")
+            if (currentHz != null) {
+                val targetHz = if (currentHz == 44100) 48000 else 44100
+                val wrote = UsbAudioController.setClockFrequency(session, targetHz)
+                L.i("Phase 3 probe: set clock to $targetHz Hz -> $wrote")
+                // Restore the original rate so we don't leave the device in an unexpected state.
+                UsbAudioController.setClockFrequency(session, currentHz)
+            }
+            val selected = found.formats.maxByOrNull { it.bitResolution }
+            if (selected != null) {
+                UsbAudioController.selectFormat(session, selected)
+            }
+        } finally {
+            UsbAudioController.release(session)
         }
     }
 }
