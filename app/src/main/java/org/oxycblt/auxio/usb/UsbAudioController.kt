@@ -60,20 +60,20 @@ object UsbAudioController {
             return null
         }
 
-        // The kernel refuses SETCONFIGURATION while any interface of the device has a kernel
-        // driver bound (e.g. snd-usb-audio auto-binds to the default configuration's audio
-        // interface the moment the device is attached, independent of our app). claimInterface
-        // (force=true) evicts that driver via USBDEVFS_DISCONNECT. We must NOT release these
-        // claims before switching configuration: releaseInterface() explicitly tells the kernel
-        // to reconnect its driver (see android_hardware_UsbDeviceConnection_release_interface in
-        // AOSP's frameworks/base/core/jni), which would immediately re-arm the exact block we're
-        // trying to clear.
+        // The kernel's USBDEVFS_SETCONFIGURATION handler (proc_setconfig) refuses the switch if
+        // *any* interface of the device is claimed by *anyone* -- including us. claimInterface
+        // (force=true) evicts a kernel driver but then claims the interface for the caller,
+        // which satisfies proc_setconfig's check just as much as the driver it replaced did.
+        // UsbNative.disconnectKernelDriver issues the raw USBDEVFS_DISCONNECT ioctl directly,
+        // without claiming anything afterward, leaving the interface in the "nothing claimed"
+        // state the kernel actually requires.
+        val fd = connection.fileDescriptor
         val defaultConfig = device.getConfiguration(0)
-        var claimedDefault = 0
+        var disconnected = 0
         for (i in 0 until defaultConfig.interfaceCount) {
-            if (connection.claimInterface(defaultConfig.getInterface(i), true)) claimedDefault++
+            if (UsbNative.disconnectKernelDriver(fd, defaultConfig.getInterface(i).id)) disconnected++
         }
-        L.i("Force-claimed $claimedDefault/${defaultConfig.interfaceCount} default-configuration interfaces")
+        L.i("Disconnected $disconnected/${defaultConfig.interfaceCount} default-configuration interfaces")
 
         val targetConfig =
             (0 until device.configurationCount)
