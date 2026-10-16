@@ -32,6 +32,7 @@ import org.oxycblt.auxio.databinding.ActivityMainBinding
 import org.oxycblt.auxio.playback.PlaybackViewModel
 import org.oxycblt.auxio.playback.state.DeferredPlayback
 import org.oxycblt.auxio.ui.UISettings
+import org.oxycblt.auxio.usb.UsbAudioManager
 import org.oxycblt.auxio.util.isNight
 import org.oxycblt.auxio.util.systemBarInsetsCompat
 import timber.log.Timber as L
@@ -54,6 +55,7 @@ import timber.log.Timber as L
 class MainActivity : AppCompatActivity() {
     private val playbackModel: PlaybackViewModel by viewModels()
     @Inject lateinit var uiSettings: UISettings
+    @Inject lateinit var usbAudioManager: UsbAudioManager
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -78,6 +80,12 @@ class MainActivity : AppCompatActivity() {
             // No intent action to do, just restore the previously saved state.
             playbackModel.playDeferred(DeferredPlayback.RestoreState(false))
         }
+
+        // Permission prompts need a foregrounded Activity, so ask here rather than in
+        // UsbAudioManager itself for any device we've detected but don't yet have access to.
+        usbAudioManager.devices.value
+            .filterNot { it.hasPermission }
+            .forEach { usbAudioManager.requestPermission(it.device) }
     }
 
     override fun onNewIntent(intent: Intent) {

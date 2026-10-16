@@ -29,6 +29,7 @@ import org.oxycblt.auxio.home.HomeSettings
 import org.oxycblt.auxio.image.ImageSettings
 import org.oxycblt.auxio.playback.PlaybackSettings
 import org.oxycblt.auxio.ui.UISettings
+import org.oxycblt.auxio.usb.UsbAudioManager
 import org.oxycblt.auxio.util.CopyleftNoticeTree
 import timber.log.Timber
 
@@ -43,6 +44,7 @@ class Auxio : Application() {
     @Inject lateinit var playbackSettings: PlaybackSettings
     @Inject lateinit var uiSettings: UISettings
     @Inject lateinit var homeSettings: HomeSettings
+    @Inject lateinit var usbAudioManager: UsbAudioManager
 
     override fun onCreate() {
         super.onCreate()
@@ -61,6 +63,7 @@ class Auxio : Application() {
         playbackSettings.migrate()
         uiSettings.migrate()
         homeSettings.migrate()
+        usbAudioManager.start()
         // Adding static shortcuts in a dynamic manner is better than declaring them
         // manually, as it will properly handle the difference between debug and release
         // Auxio instances.
