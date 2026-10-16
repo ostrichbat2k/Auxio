@@ -44,8 +44,13 @@ object UsbNative {
         numUrbs: Int,
     ): Long
 
-    /** Fills URB [slot] with [length] bytes of [data] (zero-padded if shorter) and submits it. */
-    external fun submitIso(handle: Long, slot: Int, data: ByteArray, length: Int): Boolean
+    /**
+     * Fills URB [slot] with bytes from [data] (zero-padded if shorter than the sum of
+     * [packetLengths]) and submits it with those per-packet lengths -- see
+     * [IsoPacketScheduler] for why packet lengths vary rather than always being the endpoint's
+     * max packet size.
+     */
+    external fun submitIso(handle: Long, slot: Int, data: ByteArray, packetLengths: IntArray): Boolean
 
     /** Blocks until a submitted URB completes; returns its slot index, or -1 on error/cancel. */
     external fun reapIso(handle: Long): Int

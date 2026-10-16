@@ -62,6 +62,7 @@ import org.oxycblt.auxio.playback.state.RawQueue
 import org.oxycblt.auxio.playback.state.RepeatMode
 import org.oxycblt.auxio.playback.state.ShuffleMode
 import org.oxycblt.auxio.playback.state.StateAck
+import org.oxycblt.auxio.usb.RoutingAudioSink
 import org.oxycblt.auxio.usb.UsbAudioManager
 import org.oxycblt.musikr.MusicParent
 import org.oxycblt.musikr.Song
@@ -663,26 +664,32 @@ class ExoPlaybackStateHolder(
             val audioRenderer = RenderersFactory { handler, _, audioListener, _, _ ->
                 // A ready UAC3 DAC session takes over output entirely, bypassing AudioTrack/the
                 // mixer/ReplayGain processing (no AudioProcessor chain runs on this path yet).
-                // Each renderer gets its own sink instance wrapping the same underlying session;
-                // only one renderer is ever active for a given track, so only one actually opens
-                // the USB stream at a time.
-                val usbSinkForFfmpeg = usbAudioManager.createAudioSink()
-                val usbSinkForMediaCodec = usbAudioManager.createAudioSink()
+                // RoutingAudioSink defers the USB-vs-default choice to the first configure()
+                // call rather than making it here: UsbAudioManager activates its DAC session
+                // asynchronously and the player is typically built before that finishes, so
+                // checking this early loses the race more often than not. Each renderer gets its
+                // own wrapper; only one is ever active for a given track, so only one actually
+                // opens the USB stream.
                 arrayOf<BaseRenderer>(
-                    if (usbSinkForFfmpeg != null) {
-                        FfmpegAudioRenderer(handler, audioListener, usbSinkForFfmpeg)
-                    } else {
-                        FfmpegAudioRenderer(handler, audioListener, replayGainProcessor)
-                    },
+                    FfmpegAudioRenderer(
+                        handler,
+                        audioListener,
+                        RoutingAudioSink(
+                            usbAudioManager,
+                            DefaultAudioSink.Builder(context)
+                                .setAudioProcessors(arrayOf(replayGainProcessor))
+                                .build()),
+                    ),
                     MediaCodecAudioRenderer(
                         context,
                         MediaCodecSelector.DEFAULT,
                         handler,
                         audioListener,
-                        usbSinkForMediaCodec
-                            ?: DefaultAudioSink.Builder(context)
+                        RoutingAudioSink(
+                            usbAudioManager,
+                            DefaultAudioSink.Builder(context)
                                 .setAudioProcessors(arrayOf(replayGainProcessor))
-                                .build(),
+                                .build()),
                     ),
                 )
             }

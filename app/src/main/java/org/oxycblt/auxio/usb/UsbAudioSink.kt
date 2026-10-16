@@ -32,23 +32,29 @@ import timber.log.Timber as L
  * A Media3 [AudioSink] that streams PCM directly to a UAC3 device's isochronous OUT endpoint via
  * raw USBDEVFS URBs (see [UsbNative]), bypassing AudioTrack and Android's mixer entirely.
  *
- * Supports only 16-bit stereo PCM at the fixed [sampleRateHz] this sink was built for; anything
- * else is rejected via [supportsFormat]/[getFormatSupport] so the caller can fall back elsewhere.
+ * Supports 16-bit stereo PCM at 44100 or 48000 Hz -- the two rates this device's clock source was
+ * confirmed (by direct SET_CUR/readback) to accept -- rejecting anything else via
+ * [supportsFormat]/[getFormatSupport] so the caller can fall back elsewhere. The sample rate is
+ * read from each [configure] call and the device's clock is reconfigured to match, so switching
+ * between a 44.1kHz and 48kHz track reconfigures the DAC rather than resampling anything.
+ *
+ * 44100 Hz doesn't divide evenly into USB's one-packet-per-millisecond isochronous schedule (44.1
+ * samples/packet), so packet sizes vary slightly call to call via [IsoPacketScheduler] rather than
+ * always being the endpoint's declared max -- see that class for how.
+ *
  * Rate/pitch changes, tunneling, and offload are all unsupported for the same reason direct USB
  * output exists in the first place: nothing sits between the decoder and the DAC's own clock to
  * do that kind of processing.
  */
-class UsbAudioSink(
-    private val session: UsbAudioSession,
-    private val format: UacStreamFormat,
-    private val sampleRateHz: Int,
-) : AudioSink {
+class UsbAudioSink(private val session: UsbAudioSession, private val format: UacStreamFormat) :
+    AudioSink {
 
     private companion object {
         const val PACKETS_PER_URB = 8
         const val NUM_URBS = 4
         const val RING_BUFFER_MS = 500
         const val CHANNELS = 2
+        val SUPPORTED_SAMPLE_RATES = setOf(44100, 48000)
     }
 
     private var listener: AudioSink.Listener? = null
@@ -58,8 +64,9 @@ class UsbAudioSink(
     private var framesWritten = 0L
     private var ended = false
 
-    private val bytesPerFrame = CHANNELS * format.subslotSize
-    private val ringBuffer = PcmRingBuffer(bytesPerFrame * sampleRateHz * RING_BUFFER_MS / 1000)
+    private var sampleRateHz = 0
+    private var bytesPerFrame = 0
+    private var ringBuffer = PcmRingBuffer(1)
 
     private var isoHandle = 0L
     private var streamThread: Thread? = null
@@ -73,12 +80,12 @@ class UsbAudioSink(
         val supported =
             format.pcmEncoding == C.ENCODING_PCM_16BIT &&
                 format.channelCount == CHANNELS &&
-                format.sampleRate == sampleRateHz
+                format.sampleRate in SUPPORTED_SAMPLE_RATES
         if (!supported) {
             L.i(
                 "UsbAudioSink: format not supported (encoding=${format.pcmEncoding} " +
                     "channels=${format.channelCount} rate=${format.sampleRate}, need " +
-                    "16-bit/$CHANNELS ch/$sampleRateHz Hz)")
+                    "16-bit/$CHANNELS ch/one of $SUPPORTED_SAMPLE_RATES Hz)")
         }
         return supported
     }
@@ -88,7 +95,8 @@ class UsbAudioSink(
         else AudioSink.SINK_FORMAT_UNSUPPORTED
 
     override fun getCurrentPositionUs(sourceEnded: Boolean): Long =
-        framesWritten * 1_000_000L / sampleRateHz
+        if (sampleRateHz == 0) AudioSink.CURRENT_POSITION_NOT_SET
+        else framesWritten * 1_000_000L / sampleRateHz
 
     @Deprecated("Deprecated in AudioSink interface itself; this is still the signature callers use.")
     override fun configure(inputFormat: Format, specifiedBufferSize: Int, outputChannels: IntArray?) {
@@ -96,8 +104,46 @@ class UsbAudioSink(
             throw AudioSink.ConfigurationException("Unsupported format: $inputFormat", inputFormat)
         }
         L.i("UsbAudioSink: configured for $inputFormat")
+
+        if (streaming && sampleRateHz == inputFormat.sampleRate) {
+            // Already streaming at the right rate (e.g. a flush/seek within the same track);
+            // nothing to reconfigure.
+            framesWritten = 0L
+            ended = false
+            return
+        }
+
+        stopStreamingThread()
+
+        sampleRateHz = inputFormat.sampleRate
+        bytesPerFrame = CHANNELS * format.subslotSize
+        ringBuffer = PcmRingBuffer(bytesPerFrame * sampleRateHz * RING_BUFFER_MS / 1000)
         framesWritten = 0L
         ended = false
+
+        val clockOk = UsbAudioController.setClockFrequency(session, sampleRateHz)
+        if (!clockOk) {
+            throw AudioSink.ConfigurationException(
+                "Failed to set DAC clock to $sampleRateHz Hz", inputFormat)
+        }
+
+        // Re-check mute/volume after every clock change: unknown whether reconfiguring the
+        // clock resets the Feature Unit's state on this hardware, but it's cheap to confirm and
+        // the first real-playback attempt at this point transferred perfectly (0 USB errors)
+        // while producing no audible output, which points at exactly this.
+        val muted = UsbAudioController.getMute(session)
+        L.i("UsbAudioSink: post-clock-change mute=$muted")
+        if (muted != false) {
+            UsbAudioController.setMute(session, muted = false)
+        }
+        for (channel in 1..2) {
+            val volume = UsbAudioController.getVolume(session, channel)
+            L.i("UsbAudioSink: post-clock-change channel $channel volume=$volume")
+            if (volume == null || volume < 0) {
+                UsbAudioController.setVolume(session, value = 0, channel = channel)
+            }
+        }
+
         startStreamingThread()
     }
 
@@ -198,24 +244,56 @@ class UsbAudioSink(
             L.w("UsbAudioSink: failed to open iso stream")
             return
         }
+        L.i(
+            "UsbAudioSink: opened iso stream fd=$fd endpoint=${format.endpointAddress} " +
+                "maxPacketSize=${format.maxPacketSize} handle=$handle")
         isoHandle = handle
 
-        val urbBytes = format.maxPacketSize * PACKETS_PER_URB
+        val scheduler = IsoPacketScheduler(sampleRateHz)
+        val frameBytes = bytesPerFrame
+
+        fun buildUrb(): Pair<ByteArray, IntArray> {
+            val packetLengths = IntArray(PACKETS_PER_URB)
+            var total = 0
+            for (p in 0 until PACKETS_PER_URB) {
+                val bytes = scheduler.nextPacketSampleCount() * frameBytes
+                packetLengths[p] = bytes
+                total += bytes
+            }
+            val chunk = ByteArray(total)
+            ringBuffer.readOrZeroPad(chunk)
+            return chunk to packetLengths
+        }
+
         streaming = true
         streamThread =
             Thread {
-                    val chunk = ByteArray(urbBytes)
+                    L.i("UsbAudioSink: streaming thread starting ($sampleRateHz Hz)")
                     for (slot in 0 until NUM_URBS) {
-                        ringBuffer.readOrZeroPad(chunk)
-                        UsbNative.submitIso(handle, slot, chunk, urbBytes)
+                        val (chunk, lengths) = buildUrb()
+                        val ok = UsbNative.submitIso(handle, slot, chunk, lengths)
+                        if (!ok) L.w("UsbAudioSink: initial submitIso failed for slot $slot")
                     }
+                    var submitted = 0
+                    var reapErrors = 0
                     while (streaming) {
                         val slot = UsbNative.reapIso(handle)
                         if (!streaming) break
-                        if (slot < 0) continue
-                        ringBuffer.readOrZeroPad(chunk)
-                        UsbNative.submitIso(handle, slot, chunk, urbBytes)
+                        if (slot < 0) {
+                            reapErrors++
+                            continue
+                        }
+                        val (chunk, lengths) = buildUrb()
+                        if (UsbNative.submitIso(handle, slot, chunk, lengths)) {
+                            submitted++
+                            if (submitted % 500 == 0) {
+                                L.i(
+                                    "UsbAudioSink: $submitted URBs submitted, $reapErrors reap " +
+                                        "errors, ${ringBuffer.availableToRead()} bytes buffered")
+                            }
+                        }
                     }
+                    L.i("UsbAudioSink: streaming thread exiting ($submitted submitted, $reapErrors reap errors)")
                 }
                 .apply {
                     isDaemon = true

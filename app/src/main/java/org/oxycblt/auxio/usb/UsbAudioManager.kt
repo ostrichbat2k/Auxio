@@ -44,10 +44,10 @@ import timber.log.Timber as L
  * [createAudioSink] hands out an [AudioSink] wired to that session for the player to use in place
  * of the normal AudioTrack-backed sink.
  *
- * Direct USB output is currently fixed to [SUPPORTED_SAMPLE_RATE_HZ]: USB isochronous packets are
- * scheduled one per 1ms frame, so only sample rates that divide evenly into that (48000 -> 48
- * samples/packet) fit this sink's fixed-size-packet model. 44100 Hz needs a fractional packet
- * distribution scheme (9 packets of 44 samples + 1 of 45 per 10ms) that isn't implemented yet.
+ * Direct USB output supports 44100 and 48000 Hz -- the two rates this device's clock source was
+ * confirmed to accept -- with [UsbAudioSink] reconfiguring the DAC's clock to match each track as
+ * needed (see [IsoPacketScheduler] for how 44100 Hz, which isn't a whole number of samples per
+ * USB's 1ms isochronous packet, is handled without a fixed packet size).
  */
 @Singleton
 class UsbAudioManager @Inject constructor(@ApplicationContext private val context: Context) {
@@ -178,7 +178,7 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
     fun createAudioSink(): AudioSink? {
         val session = activeSession ?: return null
         val format = activeFormat ?: return null
-        return UsbAudioSink(session, format, SUPPORTED_SAMPLE_RATE_HZ)
+        return UsbAudioSink(session, format)
     }
 
     private fun activateDac(device: UsbDevice) {
@@ -228,6 +228,12 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
             UsbAudioController.release(session)
             return
         }
+
+        // Diagnostic: confirm the updated (variable-packet-length) native pipeline still
+        // produces audible output at 44100 Hz on its own, isolating whether a problem is in that
+        // pipeline versus the AudioSink/real-decoded-PCM integration built on top of it.
+        L.i("Diagnostic: running IsoToneTest at 48000 Hz before handing off the session")
+        IsoToneTest.play(session, format, 48000, durationMs = 3000)
 
         activeSession = session
         activeFormat = format

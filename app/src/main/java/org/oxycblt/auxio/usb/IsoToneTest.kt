@@ -39,15 +39,6 @@ object IsoToneTest {
     fun play(session: UsbAudioSession, format: UacStreamFormat, sampleRateHz: Int, durationMs: Long) {
         val bytesPerSample = format.subslotSize
         val bytesPerFrame = CHANNELS * bytesPerSample
-        val samplesPerPacket = sampleRateHz / 1000
-        val packetBytes = samplesPerPacket * bytesPerFrame
-        if (packetBytes != format.maxPacketSize || sampleRateHz % 1000 != 0) {
-            L.w(
-                "Packet size mismatch for $sampleRateHz Hz (computed $packetBytes, " +
-                    "endpoint expects ${format.maxPacketSize}); aborting tone test")
-            return
-        }
-        val urbBytes = packetBytes * PACKETS_PER_URB
 
         val fd = session.connection.fileDescriptor
         val handle =
@@ -60,11 +51,19 @@ object IsoToneTest {
         var phase = 0.0
         val phaseStep = 2.0 * PI * FREQUENCY_HZ / sampleRateHz
         val peak = maxAmplitudeFor(bytesPerSample)
+        val scheduler = IsoPacketScheduler(sampleRateHz)
 
-        fun nextChunk(): ByteArray {
-            val buf = ByteArray(urbBytes)
+        fun buildUrb(): Pair<ByteArray, IntArray> {
+            val packetLengths = IntArray(PACKETS_PER_URB)
+            var total = 0
+            for (p in 0 until PACKETS_PER_URB) {
+                val bytes = scheduler.nextPacketSampleCount() * bytesPerFrame
+                packetLengths[p] = bytes
+                total += bytes
+            }
+            val buf = ByteArray(total)
             var offset = 0
-            repeat(urbBytes / bytesPerFrame) {
+            while (offset < total) {
                 val value = (sin(phase) * AMPLITUDE * peak).toInt()
                 phase += phaseStep
                 if (phase > 2.0 * PI) phase -= 2.0 * PI
@@ -73,13 +72,14 @@ object IsoToneTest {
                     offset += bytesPerSample
                 }
             }
-            return buf
+            return buf to packetLengths
         }
 
         L.i("Starting iso tone test: $sampleRateHz Hz, ${format.bitResolution}-bit, $durationMs ms")
         try {
             for (slot in 0 until NUM_URBS) {
-                UsbNative.submitIso(handle, slot, nextChunk(), urbBytes)
+                val (chunk, lengths) = buildUrb()
+                UsbNative.submitIso(handle, slot, chunk, lengths)
             }
 
             val deadline = System.currentTimeMillis() + durationMs
@@ -95,7 +95,8 @@ object IsoToneTest {
                     }
                     continue
                 }
-                UsbNative.submitIso(handle, slot, nextChunk(), urbBytes)
+                val (chunk, lengths) = buildUrb()
+                UsbNative.submitIso(handle, slot, chunk, lengths)
                 submitted++
             }
             L.i("Iso tone test done: $submitted URBs submitted, $errors reap errors")

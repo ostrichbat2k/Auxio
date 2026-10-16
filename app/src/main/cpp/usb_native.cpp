@@ -107,39 +107,67 @@ Java_org_oxycblt_auxio_usb_UsbNative_openIsoStream(
         urb->endpoint = stream->endpoint;
         urb->flags = USBDEVFS_URB_ISO_ASAP;
         urb->buffer = buffer;
-        urb->buffer_length = (int) stream->bufferLength;
-        urb->number_of_packets = packetsPerUrb;
         urb->usercontext = (void*) (intptr_t) i;
-        for (int p = 0; p < packetsPerUrb; p++) {
-            urb->iso_frame_desc[p].length = (unsigned int) maxPacketSize;
-        }
+        // iso_frame_desc[].length, buffer_length, and number_of_packets are set per submission
+        // (see submitIso) since sample rates that don't divide evenly into the 1ms packet
+        // schedule (e.g. 44100 Hz) need a varying number of samples -- and therefore bytes --
+        // per packet, not the fixed maxPacketSize every time.
         stream->urbs[i] = urb;
     }
 
     return (jlong) (intptr_t) stream;
 }
 
-// Fills URB [slot] with [length] bytes from [data] (zero-padded if shorter than the
-// URB's buffer) and submits it. Returns false if the submission itself fails; a
-// successful submission still needs to be reaped later to find out how it went.
+// Fills URB [slot] with bytes from [data] (zero-padded if shorter than the total of
+// [packetLengths]) and submits it with those per-packet lengths. Returns false if the
+// submission itself fails; a successful submission still needs to be reaped later to find out
+// how it went.
+//
+// Per-packet lengths (rather than one fixed size for every packet) are what let this carry
+// sample rates like 44100 Hz, where samples/packet isn't a whole number at USB's 1-packet-per-ms
+// schedule: the caller distributes 44 or 45 samples per packet (see IsoPacketScheduler.kt) to
+// average out to exactly 44100/sec over time.
 extern "C" JNIEXPORT jboolean JNICALL
 Java_org_oxycblt_auxio_usb_UsbNative_submitIso(
-        JNIEnv* env, jobject /*thiz*/, jlong handle, jint slot, jbyteArray data, jint length) {
+        JNIEnv* env, jobject /*thiz*/, jlong handle, jint slot, jbyteArray data,
+        jintArray packetLengths) {
     auto* stream = (IsoStream*) (intptr_t) handle;
     if (!stream || slot < 0 || slot >= stream->numUrbs) return JNI_FALSE;
     struct usbdevfs_urb* urb = stream->urbs[slot];
 
-    int bufCap = urb->buffer_length;
-    int toCopy = length < bufCap ? length : bufCap;
-    if (toCopy > 0) {
-        env->GetByteArrayRegion(data, 0, toCopy, (jbyte*) urb->buffer);
+    jsize numPackets = env->GetArrayLength(packetLengths);
+    if (numPackets <= 0 || numPackets > stream->packetsPerUrb) {
+        LOGE("Invalid packet count for slot %d: %d (max %d)", slot, numPackets, stream->packetsPerUrb);
+        return JNI_FALSE;
     }
-    if (toCopy < bufCap) {
-        memset((char*) urb->buffer + toCopy, 0, bufCap - toCopy);
+
+    jint* lengths = env->GetIntArrayElements(packetLengths, nullptr);
+    unsigned int total = 0;
+    for (jsize p = 0; p < numPackets; p++) {
+        urb->iso_frame_desc[p].length = (unsigned int) lengths[p];
+        total += (unsigned int) lengths[p];
+    }
+    env->ReleaseIntArrayElements(packetLengths, lengths, JNI_ABORT);
+
+    if (total > stream->bufferLength) {
+        LOGE("Packet total %u exceeds buffer capacity %u for slot %d", total, stream->bufferLength, slot);
+        return JNI_FALSE;
+    }
+
+    jsize dataLen = env->GetArrayLength(data);
+    unsigned int toCopy = (unsigned int) dataLen < total ? (unsigned int) dataLen : total;
+    if (toCopy > 0) {
+        env->GetByteArrayRegion(data, 0, (jsize) toCopy, (jbyte*) urb->buffer);
+    }
+    if (toCopy < total) {
+        memset((char*) urb->buffer + toCopy, 0, total - toCopy);
     }
 
     urb->status = -1;
     urb->actual_length = 0;
+    urb->buffer_length = (int) total;
+    urb->number_of_packets = (int) numPackets;
+
     int ret = ioctl(stream->fd, USBDEVFS_SUBMITURB, urb);
     if (ret != 0) {
         LOGE("SUBMITURB failed for slot %d: errno=%d", slot, errno);
