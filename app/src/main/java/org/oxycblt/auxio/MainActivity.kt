@@ -20,7 +20,10 @@ package org.oxycblt.auxio
 
 import android.content.Intent
 import android.os.Bundle
+import android.view.Gravity
 import android.view.View
+import android.widget.Button
+import android.widget.FrameLayout
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
@@ -64,6 +67,25 @@ class MainActivity : AppCompatActivity() {
         val binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         setupEdgeToEdge(binding.root)
+
+        if (BuildConfig.DEBUG) {
+            // USB DAC test hook: re-runs activation (incl. the diagnostic tone test) on demand,
+            // since there's no UI yet for it and the permission/activation flow otherwise only
+            // fires off USB attach/permission broadcasts that are a pain to force on real
+            // hardware mid-session. Remove once the USB DAC feature has real settings UI.
+            // addContentView (not binding.root.addView) because binding.root is a
+            // FragmentContainerView, which throws on any child that isn't a Fragment's view.
+            addContentView(
+                Button(this).apply {
+                    text = "Retry USB DAC"
+                    setOnClickListener { usbAudioManager.debugRetryActivation() }
+                },
+                FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT)
+                    .apply { gravity = Gravity.BOTTOM or Gravity.END },
+            )
+        }
+
         L.d("Activity created")
     }
 

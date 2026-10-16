@@ -246,6 +246,34 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
         activeFormat = null
     }
 
+    /**
+     * Testing hook: re-runs DAC activation (including the diagnostic tone test) for whatever USB
+     * audio device is currently attached. Requests permission if needed, or re-activates
+     * directly if already permitted -- Android only re-fires the permission-granted broadcast on
+     * an actual grant, not on a request for a permission [knownPermissions] already has recorded
+     * as granted, so without this there's no way to re-trigger activation short of unplugging the
+     * device or restarting the app.
+     */
+    fun debugRetryActivation() {
+        val device = _devices.value.firstOrNull()
+        if (device == null) {
+            L.w("debugRetryActivation: no USB audio device attached")
+            return
+        }
+        if (!device.hasPermission) {
+            L.i("debugRetryActivation: requesting permission for ${device.displayName}")
+            requestPermission(device.device)
+            return
+        }
+        L.i("debugRetryActivation: re-activating DAC session for ${device.displayName}")
+        deactivateDac()
+        Thread { activateDac(device.device) }
+            .apply {
+                isDaemon = true
+                start()
+            }
+    }
+
     private companion object {
         const val ACTION_USB_PERMISSION = BuildConfig.APPLICATION_ID + ".action.USB_PERMISSION"
         const val SUPPORTED_SAMPLE_RATE_HZ = 48000
