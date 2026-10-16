@@ -62,6 +62,7 @@ import org.oxycblt.auxio.playback.state.RawQueue
 import org.oxycblt.auxio.playback.state.RepeatMode
 import org.oxycblt.auxio.playback.state.ShuffleMode
 import org.oxycblt.auxio.playback.state.StateAck
+import org.oxycblt.auxio.usb.UsbAudioManager
 import org.oxycblt.musikr.MusicParent
 import org.oxycblt.musikr.Song
 import timber.log.Timber as L
@@ -654,21 +655,34 @@ class ExoPlaybackStateHolder(
         private val replayGainProcessor: ReplayGainAudioProcessor,
         private val musicRepository: MusicRepository,
         private val imageSettings: ImageSettings,
+        private val usbAudioManager: UsbAudioManager,
     ) {
         fun create(): ExoPlaybackStateHolder {
             // Since Auxio is a music player, only specify an audio renderer to save
             // battery/apk size/cache size]
             val audioRenderer = RenderersFactory { handler, _, audioListener, _, _ ->
+                // A ready UAC3 DAC session takes over output entirely, bypassing AudioTrack/the
+                // mixer/ReplayGain processing (no AudioProcessor chain runs on this path yet).
+                // Each renderer gets its own sink instance wrapping the same underlying session;
+                // only one renderer is ever active for a given track, so only one actually opens
+                // the USB stream at a time.
+                val usbSinkForFfmpeg = usbAudioManager.createAudioSink()
+                val usbSinkForMediaCodec = usbAudioManager.createAudioSink()
                 arrayOf<BaseRenderer>(
-                    FfmpegAudioRenderer(handler, audioListener, replayGainProcessor),
+                    if (usbSinkForFfmpeg != null) {
+                        FfmpegAudioRenderer(handler, audioListener, usbSinkForFfmpeg)
+                    } else {
+                        FfmpegAudioRenderer(handler, audioListener, replayGainProcessor)
+                    },
                     MediaCodecAudioRenderer(
                         context,
                         MediaCodecSelector.DEFAULT,
                         handler,
                         audioListener,
-                        DefaultAudioSink.Builder(context)
-                            .setAudioProcessors(arrayOf(replayGainProcessor))
-                            .build(),
+                        usbSinkForMediaCodec
+                            ?: DefaultAudioSink.Builder(context)
+                                .setAudioProcessors(arrayOf(replayGainProcessor))
+                                .build(),
                     ),
                 )
             }

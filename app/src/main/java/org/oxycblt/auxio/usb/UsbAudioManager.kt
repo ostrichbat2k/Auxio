@@ -28,6 +28,7 @@ import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.widget.Toast
+import androidx.media3.exoplayer.audio.AudioSink
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -38,9 +39,15 @@ import org.oxycblt.auxio.BuildConfig
 import timber.log.Timber as L
 
 /**
- * Detects attached USB Audio Class devices (candidate DACs) and manages permission requests for
- * them. This is the first stage toward direct USB audio output: detection and permission only.
- * Actual audio routing is handled separately once a permitted device is available.
+ * Detects attached USB Audio Class devices (candidate DACs), manages permission requests, and
+ * once permitted, activates a persistent [UsbAudioSession] configured and ready for playback.
+ * [createAudioSink] hands out an [AudioSink] wired to that session for the player to use in place
+ * of the normal AudioTrack-backed sink.
+ *
+ * Direct USB output is currently fixed to [SUPPORTED_SAMPLE_RATE_HZ]: USB isochronous packets are
+ * scheduled one per 1ms frame, so only sample rates that divide evenly into that (48000 -> 48
+ * samples/packet) fit this sink's fixed-size-packet model. 44100 Hz needs a fractional packet
+ * distribution scheme (9 packets of 44 samples + 1 of 45 per 10ms) that isn't implemented yet.
  */
 @Singleton
 class UsbAudioManager @Inject constructor(@ApplicationContext private val context: Context) {
@@ -48,6 +55,9 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
 
     private val _devices = MutableStateFlow<List<UsbAudioDevice>>(emptyList())
     val devices: StateFlow<List<UsbAudioDevice>> = _devices.asStateFlow()
+
+    @Volatile private var activeSession: UsbAudioSession? = null
+    @Volatile private var activeFormat: UacStreamFormat? = null
 
     private var started = false
     private var knownDeviceNames = emptySet<String>()
@@ -63,6 +73,7 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
                     }
                     UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                         L.i("USB device detached: ${intentDevice(intent)?.deviceName}")
+                        deactivateDac()
                         refresh()
                     }
                     ACTION_USB_PERMISSION -> {
@@ -144,11 +155,10 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
         for (audioDevice in found) {
             val wasPermitted = knownPermissions[audioDevice.device.deviceName] ?: false
             if (audioDevice.hasPermission && !wasPermitted) {
-                L.i("Permission newly granted for ${audioDevice.displayName}, inspecting")
-                // Inspection now includes a multi-second blocking tone-test loop (Phase 4); keep
-                // it off whatever thread refresh() was called on (the broadcast receiver's,
-                // normally the main thread).
-                Thread { UsbAudioInspector.inspect(context, audioDevice.device) }
+                L.i("Permission newly granted for ${audioDevice.displayName}, activating DAC session")
+                // Session activation blocks on several control transfers; keep it off whatever
+                // thread refresh() was called on (the broadcast receiver's, normally main).
+                Thread { activateDac(audioDevice.device) }
                     .apply {
                         isDaemon = true
                         start()
@@ -164,7 +174,74 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
     private fun UsbDevice.isAudioDevice(): Boolean =
         (0 until interfaceCount).any { getInterface(it).interfaceClass == UsbConstants.USB_CLASS_AUDIO }
 
+    /** Returns an [AudioSink] wired to the active DAC session, or null if none is ready. */
+    fun createAudioSink(): AudioSink? {
+        val session = activeSession ?: return null
+        val format = activeFormat ?: return null
+        return UsbAudioSink(session, format, SUPPORTED_SAMPLE_RATE_HZ)
+    }
+
+    private fun activateDac(device: UsbDevice) {
+        val connection = usbManager.openDevice(device)
+        if (connection == null) {
+            L.w("Could not open USB connection to ${device.deviceName}")
+            return
+        }
+        var topology: UacPlaybackTopology? = null
+        try {
+            for (i in 0 until device.configurationCount.coerceAtLeast(1)) {
+                val bytes = UsbAudioDescriptorParser.fetchConfigurationDescriptor(connection, i) ?: continue
+                UsbAudioDescriptorParser.parseUac3Playback(bytes)?.let { topology = it }
+            }
+        } finally {
+            connection.close()
+        }
+
+        val found = topology
+        if (found == null) {
+            L.i("No UAC3 playback topology found on ${device.deviceName}")
+            return
+        }
+        val format = found.formats.firstOrNull { it.bitResolution == 16 }
+        if (format == null) {
+            L.w("No 16-bit format available for ${device.deviceName}")
+            return
+        }
+
+        val session = UsbAudioController.activate(context, device, found)
+        if (session == null) {
+            L.w("Failed to activate UAC3 session for ${device.deviceName}")
+            return
+        }
+
+        val clockOk = UsbAudioController.setClockFrequency(session, SUPPORTED_SAMPLE_RATE_HZ)
+        val muted = UsbAudioController.getMute(session)
+        if (muted != false) UsbAudioController.setMute(session, muted = false)
+        for (channel in 1..2) {
+            val volume = UsbAudioController.getVolume(session, channel)
+            if (volume == null || volume < 0) UsbAudioController.setVolume(session, value = 0, channel = channel)
+        }
+        val formatOk = UsbAudioController.selectFormat(session, format)
+
+        if (!clockOk || !formatOk) {
+            L.w("Failed to configure DAC session (clock=$clockOk format=$formatOk)")
+            UsbAudioController.release(session)
+            return
+        }
+
+        activeSession = session
+        activeFormat = format
+        L.i("DAC session ready: $format at $SUPPORTED_SAMPLE_RATE_HZ Hz")
+    }
+
+    private fun deactivateDac() {
+        activeSession?.let { UsbAudioController.release(it) }
+        activeSession = null
+        activeFormat = null
+    }
+
     private companion object {
         const val ACTION_USB_PERMISSION = BuildConfig.APPLICATION_ID + ".action.USB_PERMISSION"
+        const val SUPPORTED_SAMPLE_RATE_HZ = 48000
     }
 }

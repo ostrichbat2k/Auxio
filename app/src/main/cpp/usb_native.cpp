@@ -168,6 +168,21 @@ Java_org_oxycblt_auxio_usb_UsbNative_reapIso(JNIEnv* /*env*/, jobject /*thiz*/, 
     return (jint) (intptr_t) reaped->usercontext;
 }
 
+// Cancels all outstanding URBs, unblocking any reapIso() call in flight on another thread (the
+// streaming loop's reapIso() returns -1 for a cancelled urb). Does NOT touch memory -- it's safe
+// to call concurrently with reapIso()/submitIso() on another thread, unlike closeIsoStream.
+extern "C" JNIEXPORT void JNICALL
+Java_org_oxycblt_auxio_usb_UsbNative_cancelIso(JNIEnv* /*env*/, jobject /*thiz*/, jlong handle) {
+    auto* stream = (IsoStream*) (intptr_t) handle;
+    if (!stream) return;
+    for (int i = 0; i < stream->numUrbs; i++) {
+        ioctl(stream->fd, USBDEVFS_DISCARDURB, stream->urbs[i]);
+    }
+}
+
+// Drains any remaining completions and frees everything. Only safe once the caller has confirmed
+// (e.g. via Thread.join() after cancelIso()) that no other thread is still calling reapIso() or
+// submitIso() on this handle -- this frees the same memory those functions read and write.
 extern "C" JNIEXPORT void JNICALL
 Java_org_oxycblt_auxio_usb_UsbNative_closeIsoStream(JNIEnv* /*env*/, jobject /*thiz*/, jlong handle) {
     auto* stream = (IsoStream*) (intptr_t) handle;

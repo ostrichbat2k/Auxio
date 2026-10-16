@@ -50,6 +50,16 @@ object UsbNative {
     /** Blocks until a submitted URB completes; returns its slot index, or -1 on error/cancel. */
     external fun reapIso(handle: Long): Int
 
-    /** Cancels all outstanding URBs and frees the stream. */
+    /**
+     * Cancels all outstanding URBs, unblocking any in-flight [reapIso] call on another thread.
+     * Safe to call concurrently with [reapIso]/[submitIso]; always call this and join() the
+     * thread using the stream *before* [closeIsoStream], not after.
+     */
+    external fun cancelIso(handle: Long)
+
+    /**
+     * Drains remaining completions and frees the stream. Only safe once no other thread is still
+     * calling [reapIso]/[submitIso] on this handle (confirmed via [cancelIso] + Thread.join()).
+     */
     external fun closeIsoStream(handle: Long)
 }
