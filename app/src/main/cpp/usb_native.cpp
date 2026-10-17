@@ -193,6 +193,35 @@ Java_org_oxycblt_auxio_usb_UsbNative_reapIso(JNIEnv* /*env*/, jobject /*thiz*/, 
         LOGE("Reaped urb slot %ld with status=%d actual_length=%d",
              (long) (intptr_t) reaped->usercontext, reaped->status, reaped->actual_length);
     }
+
+    // The aggregate urb->status above only reflects whether the *submission as a whole* was
+    // accepted/retired by the host controller -- for isochronous transfers it can read 0 even
+    // when individual packets inside a "successful" URB failed to actually reach the device
+    // (each has its own status/actual_length in iso_frame_desc[]). Checking only the aggregate
+    // status is exactly the kind of gap that would make a transfer look completely clean while
+    // the device received partial or no usable audio data.
+    int badPackets = 0;
+    unsigned int totalActual = 0;
+    unsigned int totalExpected = 0;
+    for (int p = 0; p < reaped->number_of_packets; p++) {
+        const auto& desc = reaped->iso_frame_desc[p];
+        totalActual += desc.actual_length;
+        totalExpected += desc.length;
+        if (desc.status != 0 || desc.actual_length != desc.length) {
+            if (badPackets < 3) {
+                LOGE("Reaped urb slot %ld packet %d: status=%d actual_length=%u expected=%u",
+                     (long) (intptr_t) reaped->usercontext, p, desc.status, desc.actual_length,
+                     desc.length);
+            }
+            badPackets++;
+        }
+    }
+    if (badPackets > 0) {
+        LOGE("Reaped urb slot %ld: %d/%d packets short/failed, %u/%u bytes actually delivered",
+             (long) (intptr_t) reaped->usercontext, badPackets, reaped->number_of_packets,
+             totalActual, totalExpected);
+    }
+
     return (jint) (intptr_t) reaped->usercontext;
 }
 

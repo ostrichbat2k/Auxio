@@ -144,6 +144,12 @@ class UsbAudioSink(private val session: UsbAudioSession, private val format: Uac
             }
         }
 
+        // See DAC_SETTLE_DELAY_MS: give the clock change just above time to actually lock
+        // before the first packet goes out. Deliberately not calling reassertKernelEviction
+        // here -- see UsbAudioManager.activateDac's comment on that call: evicting a driver
+        // after the alt-setting is already selected resets the interface back to alt 0 as a
+        // side effect, which would undo the activation this sink depends on.
+        Thread.sleep(DAC_SETTLE_DELAY_MS)
         startStreamingThread()
     }
 

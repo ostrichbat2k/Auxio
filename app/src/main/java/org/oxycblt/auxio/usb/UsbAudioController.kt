@@ -27,6 +27,7 @@ import timber.log.Timber as L
 
 /** An activated USB connection to a UAC3 device: configuration selected, interfaces claimed. */
 data class UsbAudioSession(
+    val device: UsbDevice,
     val connection: UsbDeviceConnection,
     val topology: UacPlaybackTopology,
     val controlInterface: UsbInterface,
@@ -45,11 +46,20 @@ data class UsbAudioSession(
  * so [getClockFrequency] is meant to be tried first as a safe, read-only check of the addressing
  * before any SET_CUR write is attempted.
  */
+/**
+ * How long to wait after a clock-frequency or alternate-setting change before streaming to this
+ * device: both were observed to sometimes complete (readback confirms the new rate, iso
+ * transfers report zero errors) before the DAC's own clock/output stage has actually locked onto
+ * it, producing clean, error-free, but silent transfers for however long it stays unlocked.
+ */
+const val DAC_SETTLE_DELAY_MS = 300L
+
 object UsbAudioController {
     private const val REQ_TYPE_CLASS_INTERFACE_GET = 0xA1 // Device-to-host, Class, Interface
     private const val REQ_TYPE_CLASS_INTERFACE_SET = 0x21 // Host-to-device, Class, Interface
     private const val UAC_REQUEST_CUR = 0x01
     private const val CS_SAM_FREQ_CONTROL = 0x01
+    private const val CS_CLOCK_VALID_CONTROL = 0x02
     private const val FU_MUTE_CONTROL = 0x01
     private const val FU_VOLUME_CONTROL = 0x02
 
@@ -128,7 +138,32 @@ object UsbAudioController {
             "Activated UAC3 session: config=${targetConfig.id} " +
                 "control=${control.id} streaming=${topology.streamingInterfaceNumber} " +
                 "alts=${streamingAlts.keys}")
-        return UsbAudioSession(connection, topology, control, streamingAlts)
+        return UsbAudioSession(device, connection, topology, control, streamingAlts)
+    }
+
+    /**
+     * Re-evicts whatever kernel driver is bound to this session's interfaces, right before
+     * streaming starts.
+     *
+     * Android's own UsbAlsaManager independently binds the kernel's snd-usb-audio driver to any
+     * USB Audio Class device as soon as it's attached -- confirmed via logcat: its ALSA device
+     * node creation (alsaFileAdded(pcmC1D0p) etc.) was observed landing *during* this class's own
+     * [activate] sequence, after the one-time [UsbNative.disconnectKernelDriver] pass in
+     * [activate] had already run. That kernel probe appears to still be completing
+     * asynchronously at that point, so it can rebind (or finish binding) after we've already
+     * evicted it once, racing our own clock/alt-setting setup -- exactly the kind of thing that
+     * would make iso transfers look completely clean at our claimed interface while the device's
+     * actual output stage got reconfigured out from under us by the competing driver. Calling
+     * this again immediately before the first packet goes out closes that window.
+     */
+    fun reassertKernelEviction(session: UsbAudioSession) {
+        val fd = session.connection.fileDescriptor
+        val defaultConfig = session.device.getConfiguration(0)
+        var disconnected = 0
+        for (i in 0 until defaultConfig.interfaceCount) {
+            if (UsbNative.disconnectKernelDriver(fd, defaultConfig.getInterface(i).id)) disconnected++
+        }
+        L.i("Re-evicted $disconnected/${defaultConfig.interfaceCount} interfaces before streaming")
     }
 
     fun release(session: UsbAudioSession) {
@@ -158,6 +193,29 @@ object UsbAudioController {
                 ((buffer[3].toInt() and 0xFF) shl 24)
         L.i("Clock ${session.topology.clockSourceId} current frequency: $hz Hz")
         return hz
+    }
+
+    /**
+     * Reads the clock source's CLOCK_VALID bit, or null if this control isn't readable on this
+     * device. Isochronous OUT has no device-side handshake at all -- "clean, 0-error transfer"
+     * only means the host successfully put bytes on the wire on schedule, never that the device
+     * actually had a locked clock to render them with. This is the one piece of ground truth the
+     * device itself can report back about whether it's actually ready to stream.
+     */
+    fun getClockValid(session: UsbAudioSession): Boolean? {
+        val buffer = ByteArray(1)
+        val wValue = CS_CLOCK_VALID_CONTROL shl 8
+        val wIndex = (session.topology.clockSourceId shl 8) or session.controlInterface.id
+        val result =
+            session.connection.controlTransfer(
+                REQ_TYPE_CLASS_INTERFACE_GET, UAC_REQUEST_CUR, wValue, wIndex, buffer, buffer.size, 1000)
+        if (result != 1) {
+            L.w("GET_CUR clock valid failed: result=$result (wValue=$wValue wIndex=$wIndex)")
+            return null
+        }
+        val valid = (buffer[0].toInt() and 0x01) != 0
+        L.i("Clock ${session.topology.clockSourceId} valid=$valid")
+        return valid
     }
 
     /** Attempts to set the clock source sample rate in Hz, then reads it back to confirm. */

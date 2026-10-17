@@ -85,6 +85,7 @@ object IsoToneTest {
             val deadline = System.currentTimeMillis() + durationMs
             var submitted = 0
             var errors = 0
+            var submitFailures = 0
             while (System.currentTimeMillis() < deadline) {
                 val slot = UsbNative.reapIso(handle)
                 if (slot < 0) {
@@ -96,10 +97,20 @@ object IsoToneTest {
                     continue
                 }
                 val (chunk, lengths) = buildUrb()
-                UsbNative.submitIso(handle, slot, chunk, lengths)
-                submitted++
+                // The return value here was previously ignored, which let URBs silently fail to
+                // resubmit (SUBMITURB can fail with ENODEV/EBUSY/ESHUTDOWN even when reapIso()
+                // keeps succeeding for other in-flight URBs) while "0 reap errors" made it look
+                // like a perfectly clean transfer -- exactly the gap that was hiding a real,
+                // intermittent submission failure during silent-but-"clean" runs.
+                if (UsbNative.submitIso(handle, slot, chunk, lengths)) {
+                    submitted++
+                } else {
+                    submitFailures++
+                }
             }
-            L.i("Iso tone test done: $submitted URBs submitted, $errors reap errors")
+            L.i(
+                "Iso tone test done: $submitted URBs submitted, $errors reap errors, " +
+                    "$submitFailures submit failures")
         } finally {
             UsbNative.closeIsoStream(handle)
         }

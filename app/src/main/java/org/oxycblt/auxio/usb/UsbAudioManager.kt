@@ -221,6 +221,17 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
             val volume = UsbAudioController.getVolume(session, channel)
             if (volume == null || volume < 0) UsbAudioController.setVolume(session, value = 0, channel = channel)
         }
+
+        // Android's own UsbAlsaManager independently binds the kernel's snd-usb-audio driver to
+        // any USB Audio Class device on attach; that bind was observed completing (ALSA device
+        // node creation logged) *during* this very activation sequence, after the one-time
+        // disconnectKernelDriver pass in UsbAudioController.activate() had already run -- so it
+        // can still be racing us at this point. Evicting it again here, right before the final
+        // alt-setting selection, is safe; evicting it *after* selectFormat was tried first and
+        // broke every subsequent iso submission (errno=ENOENT), almost certainly because
+        // disconnecting a driver resets the interface to alt-setting 0 as a side effect, undoing
+        // whatever alt-setting was just selected. So this must stay before selectFormat, not after.
+        UsbAudioController.reassertKernelEviction(session)
         val formatOk = UsbAudioController.selectFormat(session, format)
 
         if (!clockOk || !formatOk) {
@@ -232,8 +243,19 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
         // Diagnostic: confirm the updated (variable-packet-length) native pipeline still
         // produces audible output at 44100 Hz on its own, isolating whether a problem is in that
         // pipeline versus the AudioSink/real-decoded-PCM integration built on top of it.
+        //
+        // The silence turned out to be intermittent, not a fixed code regression: the same build
+        // was confirmed both audible and silent across repeated runs with no code change in
+        // between. Hypothesis: the clock/alt-setting switch just above needs some settling time
+        // on this hardware before it's actually ready to render, and streaming immediately after
+        // sometimes races ahead of that. DAC_SETTLE_DELAY_MS gives it a moment before the first
+        // packet goes out. Do NOT call reassertKernelEviction after selectFormat -- see the
+        // comment above that call for why.
+        Thread.sleep(DAC_SETTLE_DELAY_MS)
+        L.i("Diagnostic: clock valid right before streaming = ${UsbAudioController.getClockValid(session)}")
         L.i("Diagnostic: running IsoToneTest at 48000 Hz before handing off the session")
         IsoToneTest.play(session, format, 48000, durationMs = 3000)
+        L.i("Diagnostic: clock valid right after streaming = ${UsbAudioController.getClockValid(session)}")
 
         activeSession = session
         activeFormat = format
