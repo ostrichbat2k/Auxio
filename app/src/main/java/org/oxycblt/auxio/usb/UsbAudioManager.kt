@@ -30,6 +30,9 @@ import android.os.Build
 import android.widget.Toast
 import androidx.media3.exoplayer.audio.AudioSink
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -55,6 +58,19 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
 
     private val _devices = MutableStateFlow<List<UsbAudioDevice>>(emptyList())
     val devices: StateFlow<List<UsbAudioDevice>> = _devices.asStateFlow()
+
+    private val _diagnosticLog = MutableStateFlow<List<String>>(emptyList())
+    /** Most-recent-first log of activation events, for the USB settings screen. */
+    val diagnosticLog: StateFlow<List<String>> = _diagnosticLog.asStateFlow()
+
+    private val timeFormatter = SimpleDateFormat("HH:mm:ss", Locale.US)
+
+    /** Appends a timestamped line to [diagnosticLog] (newest first, capped at [LOG_CAPACITY]). */
+    private fun logEvent(message: String) {
+        val stamp = timeFormatter.format(Date())
+        L.i(message)
+        _diagnosticLog.value = (listOf("$stamp  $message") + _diagnosticLog.value).take(LOG_CAPACITY)
+    }
 
     @Volatile private var activeSession: UsbAudioSession? = null
     @Volatile private var activeFormat: UacStreamFormat? = null
@@ -182,15 +198,17 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
     }
 
     private fun activateDac(device: UsbDevice) {
+        logEvent("Activating ${device.productName ?: device.deviceName}")
         val connection = usbManager.openDevice(device)
         if (connection == null) {
-            L.w("Could not open USB connection to ${device.deviceName}")
+            logEvent("Could not open USB connection to ${device.deviceName}")
             return
         }
         var topology: UacPlaybackTopology? = null
         try {
             for (i in 0 until device.configurationCount.coerceAtLeast(1)) {
                 val bytes = UsbAudioDescriptorParser.fetchConfigurationDescriptor(connection, i) ?: continue
+                UsbAudioDescriptorParser.dumpAcTopology(bytes)
                 UsbAudioDescriptorParser.parseUac3Playback(bytes)?.let { topology = it }
             }
         } finally {
@@ -199,27 +217,68 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
 
         val found = topology
         if (found == null) {
-            L.i("No UAC3 playback topology found on ${device.deviceName}")
+            logEvent("No UAC3 playback topology found on ${device.deviceName}")
             return
         }
         val format = found.formats.firstOrNull { it.bitResolution == 16 }
         if (format == null) {
-            L.w("No 16-bit format available for ${device.deviceName}")
+            logEvent("No 16-bit format available for ${device.deviceName}")
             return
         }
+        logEvent(
+            "Topology found: mixer=${found.mixerUnitId} featureUnit=${found.outputFeatureUnitId} " +
+                "clock=${found.clockSourceId}")
 
         val session = UsbAudioController.activate(context, device, found)
         if (session == null) {
-            L.w("Failed to activate UAC3 session for ${device.deviceName}")
+            logEvent("Failed to activate UAC3 session for ${device.deviceName}")
             return
         }
 
         val clockOk = UsbAudioController.setClockFrequency(session, SUPPORTED_SAMPLE_RATE_HZ)
+        logEvent("Clock set to $SUPPORTED_SAMPLE_RATE_HZ Hz: ok=$clockOk")
         val muted = UsbAudioController.getMute(session)
         if (muted != false) UsbAudioController.setMute(session, muted = false)
-        for (channel in 1..2) {
+        // Master channel (0) volume: we check master *mute* above, but had never checked
+        // master *volume* -- if this Feature Unit has an independent master gain stage
+        // separate from the per-channel ones below, it being low/attenuated would silence
+        // everything regardless of what channels 1/2 are set to.
+        for (channel in 0..2) {
             val volume = UsbAudioController.getVolume(session, channel)
-            if (volume == null || volume < 0) UsbAudioController.setVolume(session, value = 0, channel = channel)
+            // 0 (1/256 dB) is 0dB/unity gain by the general UAC convention, but that's only
+            // ever been an assumption -- never actually checked against what this specific
+            // device itself reports as its real maximum via GET_RANGE. If its true max isn't
+            // 0 (firmware quirk, or a device that encodes gain rather than attenuation),
+            // writing 0 could be landing well short of audible.
+            val range = UsbAudioController.getVolumeRange(session, channel)
+            val target = range?.second ?: 0
+            if (volume == null || volume != target) {
+                UsbAudioController.setVolume(session, value = target, channel = channel)
+            }
+            logEvent("Volume ch$channel: was=$volume range=$range target=$target")
+        }
+
+        // Our USB input doesn't feed the output Feature Unit directly on every device -- on
+        // this one it's first summed into a Mixer Unit alongside a second source (the hardware
+        // mic path), discovered via UsbAudioDescriptorParser.dumpAcTopology. The Feature Unit
+        // being correctly unmuted at unity means nothing if the mixer's own per-channel gain for
+        // our input defaults to silence, independent of and upstream from everything above.
+        val mixerUnitId = found.mixerUnitId
+        val mixerBase = found.mixerInputChannelBase
+        if (mixerUnitId >= 0 && mixerBase >= 0) {
+            for (inCh in mixerBase until mixerBase + 2) {
+                for (outCh in 1..2) {
+                    val gain = UsbAudioController.getMixerGain(session, mixerUnitId, inCh, outCh)
+                    val gainRange = UsbAudioController.getMixerGainRange(session, mixerUnitId, inCh, outCh)
+                    val gainTarget = gainRange?.second ?: 0
+                    if (gain == null || gain != gainTarget) {
+                        UsbAudioController.setMixerGain(session, mixerUnitId, inCh, outCh, gainTarget)
+                    }
+                    logEvent("Mixer gain in=$inCh out=$outCh: was=$gain range=$gainRange target=$gainTarget")
+                }
+            }
+        } else {
+            logEvent("No mixer unit gating our USB input (mixerUnitId=$mixerUnitId base=$mixerBase)")
         }
 
         // Android's own UsbAlsaManager independently binds the kernel's snd-usb-audio driver to
@@ -233,9 +292,10 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
         // whatever alt-setting was just selected. So this must stay before selectFormat, not after.
         UsbAudioController.reassertKernelEviction(session)
         val formatOk = UsbAudioController.selectFormat(session, format)
+        logEvent("Alt-setting ${format.alternateSetting} (${format.bitResolution}-bit) selected: ok=$formatOk")
 
         if (!clockOk || !formatOk) {
-            L.w("Failed to configure DAC session (clock=$clockOk format=$formatOk)")
+            logEvent("Failed to configure DAC session (clock=$clockOk format=$formatOk)")
             UsbAudioController.release(session)
             return
         }
@@ -252,14 +312,13 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
         // packet goes out. Do NOT call reassertKernelEviction after selectFormat -- see the
         // comment above that call for why.
         Thread.sleep(DAC_SETTLE_DELAY_MS)
-        L.i("Diagnostic: clock valid right before streaming = ${UsbAudioController.getClockValid(session)}")
-        L.i("Diagnostic: running IsoToneTest at 48000 Hz before handing off the session")
+        logEvent("Clock valid before streaming: ${UsbAudioController.getClockValid(session)}")
         IsoToneTest.play(session, format, 48000, durationMs = 3000)
-        L.i("Diagnostic: clock valid right after streaming = ${UsbAudioController.getClockValid(session)}")
+        logEvent("Clock valid after streaming: ${UsbAudioController.getClockValid(session)}")
 
         activeSession = session
         activeFormat = format
-        L.i("DAC session ready: $format at $SUPPORTED_SAMPLE_RATE_HZ Hz")
+        logEvent("DAC session ready: $format at $SUPPORTED_SAMPLE_RATE_HZ Hz")
     }
 
     private fun deactivateDac() {
@@ -299,5 +358,6 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
     private companion object {
         const val ACTION_USB_PERMISSION = BuildConfig.APPLICATION_ID + ".action.USB_PERMISSION"
         const val SUPPORTED_SAMPLE_RATE_HZ = 48000
+        const val LOG_CAPACITY = 50
     }
 }

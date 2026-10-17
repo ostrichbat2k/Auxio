@@ -48,7 +48,15 @@ object UsbAudioDescriptorParser {
     // UAC 1.0/2.0's subtype numbers (e.g. FEATURE_UNIT is 6 in UAC2 but 7 in UAC3).
     private const val AC_INPUT_TERMINAL = 0x02
     private const val AC_OUTPUT_TERMINAL = 0x03
+    private const val AC_MIXER_UNIT = 0x05
+    private const val AC_SELECTOR_UNIT = 0x06
+    private const val AC_FEATURE_UNIT = 0x07
+    private const val AC_EFFECT_UNIT = 0x08
+    private const val AC_PROCESSING_UNIT = 0x09
+    private const val AC_EXTENSION_UNIT = 0x0A
     private const val AC_CLOCK_SOURCE = 0x0B
+    private const val AC_CLOCK_SELECTOR = 0x0C
+    private const val AC_CLOCK_MULTIPLIER = 0x0D
 
     // AudioStreaming class-specific interface descriptor subtype (UAC 3.0). Unlike UAC 1.0/2.0,
     // UAC 3.0 folds format info directly into AS_GENERAL rather than a separate FORMAT_TYPE
@@ -79,6 +87,78 @@ object UsbAudioDescriptorParser {
             L.w("Short read on configuration descriptor $configIndex: got $fullLen, wanted $totalLength")
         }
         return if (fullLen > 0) full.copyOf(fullLen) else null
+    }
+
+    /**
+     * Diagnostic: logs every entity in the UAC 3.0 AudioControl interface's topology graph --
+     * not just the Clock Source and single Feature Unit [parseUac3Playback] extracts for
+     * playback. That parser's Output Terminal handling *assumes* bSourceID points directly at
+     * the Feature Unit that gates audible output ("the last Feature Unit before the physical
+     * jack"); this walk verifies that assumption by printing the real id/type/source chain for
+     * every unit (Mixer, Selector, Processing, Extension, Feature) and terminal, so a Selector
+     * or Mixer Unit sitting between them -- never configured, never even known about -- would
+     * show up here instead of silently gating the signal.
+     */
+    fun dumpAcTopology(configBytes: ByteArray) {
+        val entries = walk(configBytes)
+        var currentInterfaceNumber = -1
+        var currentInterfaceSubClass = -1
+        var currentInterfaceProtocol = -1
+        for ((type, bytes) in entries) {
+            when (type) {
+                DESC_TYPE_INTERFACE -> {
+                    currentInterfaceNumber = bytes.u8(2)
+                    currentInterfaceSubClass = bytes.u8(6)
+                    currentInterfaceProtocol = bytes.u8(7)
+                }
+                DESC_TYPE_CS_INTERFACE -> {
+                    if (currentInterfaceSubClass != AC_SUBCLASS || currentInterfaceProtocol != UAC3_PROTOCOL) {
+                        continue
+                    }
+                    val subtype = bytes.u8(2)
+                    val hex = bytes.joinToString(" ") { "%02x".format(it) }
+                    val desc =
+                        when (subtype) {
+                            AC_INPUT_TERMINAL ->
+                                "INPUT_TERMINAL id=${bytes.u8(3)} type=0x${"%04x".format(bytes.u16(4))}"
+                            AC_OUTPUT_TERMINAL ->
+                                "OUTPUT_TERMINAL id=${bytes.u8(3)} type=0x${"%04x".format(bytes.u16(4))} " +
+                                    "bSourceID=${bytes.u8(7)}"
+                            AC_MIXER_UNIT -> {
+                                val nrIn = bytes.u8(4)
+                                "MIXER_UNIT id=${bytes.u8(3)} nrInPins=$nrIn " +
+                                    "sources=${(0 until nrIn).map { bytes.u8(5 + it) }}"
+                            }
+                            AC_SELECTOR_UNIT -> {
+                                val nrIn = bytes.u8(4)
+                                "SELECTOR_UNIT id=${bytes.u8(3)} nrInPins=$nrIn " +
+                                    "sources=${(0 until nrIn).map { bytes.u8(5 + it) }}"
+                            }
+                            AC_FEATURE_UNIT -> "FEATURE_UNIT id=${bytes.u8(3)} bSourceID=${bytes.u8(4)}"
+                            AC_EFFECT_UNIT -> "EFFECT_UNIT id=${bytes.u8(3)} bSourceID=${bytes.u8(6)}"
+                            AC_PROCESSING_UNIT -> {
+                                val nrIn = bytes.u8(6)
+                                "PROCESSING_UNIT id=${bytes.u8(3)} nrInPins=$nrIn " +
+                                    "sources=${(0 until nrIn).map { bytes.u8(7 + it) }}"
+                            }
+                            AC_EXTENSION_UNIT -> {
+                                val nrIn = bytes.u8(6)
+                                "EXTENSION_UNIT id=${bytes.u8(3)} nrInPins=$nrIn " +
+                                    "sources=${(0 until nrIn).map { bytes.u8(7 + it) }}"
+                            }
+                            AC_CLOCK_SOURCE -> "CLOCK_SOURCE id=${bytes.u8(3)}"
+                            AC_CLOCK_SELECTOR -> {
+                                val nrIn = bytes.u8(4)
+                                "CLOCK_SELECTOR id=${bytes.u8(3)} nrInPins=$nrIn " +
+                                    "sources=${(0 until nrIn).map { bytes.u8(5 + it) }}"
+                            }
+                            AC_CLOCK_MULTIPLIER -> "CLOCK_MULTIPLIER id=${bytes.u8(3)} bCSourceID=${bytes.u8(4)}"
+                            else -> "subtype=0x${"%02x".format(subtype)}"
+                        }
+                    L.i("AC topology [iface $currentInterfaceNumber]: $desc  (raw: $hex)")
+                }
+            }
+        }
     }
 
     /** Splits a raw configuration descriptor into its sequential (type, bytes) TLV entries. */
@@ -119,6 +199,8 @@ object UsbAudioDescriptorParser {
         var clockSourceId = -1
         var usbStreamingTerminalId = -1
         var outputFeatureUnitId = -1
+        var mixerUnitId = -1
+        var mixerInputChannelBase = -1
 
         val formatsByInterface = mutableMapOf<Int, MutableList<UacStreamFormat>>()
         var pendingAltSetting = -1
@@ -195,6 +277,20 @@ object UsbAudioDescriptorParser {
                                     outputFeatureUnitId = bytes.u8(7) // bSourceID
                                 }
                             }
+                            AC_MIXER_UNIT -> {
+                                val nrIn = bytes.u8(4)
+                                val sources = (0 until nrIn).map { bytes.u8(5 + it) }
+                                val pin = sources.indexOf(usbStreamingTerminalId)
+                                if (pin >= 0) {
+                                    mixerUnitId = bytes.u8(3)
+                                    // Only pin 0 is handled: any other pin's base channel number
+                                    // requires summing the channel counts of every preceding
+                                    // pin's source, which needs their Cluster Descriptors (a
+                                    // separate UAC3 High-Capability descriptor fetch) that this
+                                    // parser doesn't do.
+                                    mixerInputChannelBase = if (pin == 0) 1 else -1
+                                }
+                            }
                         }
                     } else if (currentInterfaceSubClass == AS_SUBCLASS &&
                         currentInterfaceProtocol == UAC3_PROTOCOL &&
@@ -239,6 +335,8 @@ object UsbAudioDescriptorParser {
             streamingInterfaceNumber = streamingInterfaceNumber,
             clockSourceId = clockSourceId,
             outputFeatureUnitId = outputFeatureUnitId,
+            mixerUnitId = mixerUnitId,
+            mixerInputChannelBase = mixerInputChannelBase,
             formats = formats)
     }
 }

@@ -58,6 +58,7 @@ object UsbAudioController {
     private const val REQ_TYPE_CLASS_INTERFACE_GET = 0xA1 // Device-to-host, Class, Interface
     private const val REQ_TYPE_CLASS_INTERFACE_SET = 0x21 // Host-to-device, Class, Interface
     private const val UAC_REQUEST_CUR = 0x01
+    private const val UAC_REQUEST_RANGE = 0x02
     private const val CS_SAM_FREQ_CONTROL = 0x01
     private const val CS_CLOCK_VALID_CONTROL = 0x02
     private const val FU_MUTE_CONTROL = 0x01
@@ -290,6 +291,34 @@ object UsbAudioController {
         return (buffer[0].toInt() and 0xFF) or (buffer[1].toInt() shl 8)
     }
 
+    /**
+     * Reads the Feature Unit's volume MIN/MAX for [channel] via the UAC2/3 RANGE request, or
+     * null on failure. We've been assuming 0 (1/256 dB units, i.e. 0dB/unity) is this device's
+     * loudest setting, per the general UAC convention -- but that's never actually been
+     * confirmed against this specific device's own reported range. If its real MAX is some
+     * other, non-zero value (firmware quirk, or a device that encodes gain rather than
+     * attenuation), writing 0 could be landing well short of audible instead of at unity.
+     */
+    fun getVolumeRange(session: UsbAudioSession, channel: Int): Pair<Int, Int>? {
+        val unitId = session.topology.outputFeatureUnitId
+        if (unitId < 0) return null
+        val buffer = ByteArray(8) // wNumSubRanges(2) + MIN(2) + MAX(2) + RES(2), one subrange
+        val wValue = (FU_VOLUME_CONTROL shl 8) or channel
+        val wIndex = (unitId shl 8) or session.controlInterface.id
+        val result =
+            session.connection.controlTransfer(
+                REQ_TYPE_CLASS_INTERFACE_GET, UAC_REQUEST_RANGE, wValue, wIndex, buffer, buffer.size, 1000)
+        if (result < 8) {
+            L.w("GET_RANGE volume (unit=$unitId ch=$channel) failed: result=$result")
+            return null
+        }
+        val numSubRanges = (buffer[0].toInt() and 0xFF) or ((buffer[1].toInt() and 0xFF) shl 8)
+        val min = (buffer[2].toInt() and 0xFF) or (buffer[3].toInt() shl 8)
+        val max = (buffer[4].toInt() and 0xFF) or (buffer[5].toInt() shl 8)
+        L.i("Volume range (unit=$unitId ch=$channel): numSubRanges=$numSubRanges min=$min max=$max")
+        return min to max
+    }
+
     /** Sets the Feature Unit's volume for [channel] (0=master, 1=left, 2=right), in 1/256 dB. */
     fun setVolume(session: UsbAudioSession, value: Int, channel: Int): Boolean {
         val unitId = session.topology.outputFeatureUnitId
@@ -301,6 +330,77 @@ object UsbAudioController {
             session.connection.controlTransfer(
                 REQ_TYPE_CLASS_INTERFACE_SET, UAC_REQUEST_CUR, wValue, wIndex, buffer, buffer.size, 1000)
         L.i("SET_CUR volume (unit=$unitId ch=$channel) to $value: result=$result")
+        return result >= 0
+    }
+
+    /**
+     * Reads a Mixer Unit's programmable gain for one (input channel, output channel) pair, in
+     * 1/256 dB, or null on failure. Unlike a Feature Unit's single mute/volume, a Mixer Unit's
+     * "control selector" slot in wValue is the 1-based *input* channel number itself (not a
+     * fixed selector constant), with the 1-based output channel in the low byte -- confirmed
+     * against the Linux kernel's own usbmixer (sound/usb/mixer.c: build_mixer_unit_ctl's
+     * `cval->control = in_ch + 1`, then validx = (control << 8) | output_channel).
+     */
+    fun getMixerGain(session: UsbAudioSession, mixerUnitId: Int, inputChannel: Int, outputChannel: Int): Int? {
+        val buffer = ByteArray(2)
+        val wValue = (inputChannel shl 8) or outputChannel
+        val wIndex = (mixerUnitId shl 8) or session.controlInterface.id
+        val result =
+            session.connection.controlTransfer(
+                REQ_TYPE_CLASS_INTERFACE_GET, UAC_REQUEST_CUR, wValue, wIndex, buffer, buffer.size, 1000)
+        if (result != 2) {
+            L.w(
+                "GET_CUR mixer gain (unit=$mixerUnitId in=$inputChannel out=$outputChannel) " +
+                    "failed: result=$result")
+            return null
+        }
+        return (buffer[0].toInt() and 0xFF) or (buffer[1].toInt() shl 8)
+    }
+
+    /** Reads a Mixer Unit's gain range for one (input channel, output channel) pair, or null. */
+    fun getMixerGainRange(
+        session: UsbAudioSession,
+        mixerUnitId: Int,
+        inputChannel: Int,
+        outputChannel: Int,
+    ): Pair<Int, Int>? {
+        val buffer = ByteArray(8)
+        val wValue = (inputChannel shl 8) or outputChannel
+        val wIndex = (mixerUnitId shl 8) or session.controlInterface.id
+        val result =
+            session.connection.controlTransfer(
+                REQ_TYPE_CLASS_INTERFACE_GET, UAC_REQUEST_RANGE, wValue, wIndex, buffer, buffer.size, 1000)
+        if (result < 8) {
+            L.w(
+                "GET_RANGE mixer gain (unit=$mixerUnitId in=$inputChannel out=$outputChannel) " +
+                    "failed: result=$result")
+            return null
+        }
+        val min = (buffer[2].toInt() and 0xFF) or (buffer[3].toInt() shl 8)
+        val max = (buffer[4].toInt() and 0xFF) or (buffer[5].toInt() shl 8)
+        L.i(
+            "Mixer gain range (unit=$mixerUnitId in=$inputChannel out=$outputChannel): " +
+                "min=$min max=$max")
+        return min to max
+    }
+
+    /** Sets a Mixer Unit's programmable gain for one (input channel, output channel) pair. */
+    fun setMixerGain(
+        session: UsbAudioSession,
+        mixerUnitId: Int,
+        inputChannel: Int,
+        outputChannel: Int,
+        value: Int,
+    ): Boolean {
+        val wValue = (inputChannel shl 8) or outputChannel
+        val wIndex = (mixerUnitId shl 8) or session.controlInterface.id
+        val buffer = byteArrayOf((value and 0xFF).toByte(), ((value shr 8) and 0xFF).toByte())
+        val result =
+            session.connection.controlTransfer(
+                REQ_TYPE_CLASS_INTERFACE_SET, UAC_REQUEST_CUR, wValue, wIndex, buffer, buffer.size, 1000)
+        L.i(
+            "SET_CUR mixer gain (unit=$mixerUnitId in=$inputChannel out=$outputChannel) to " +
+                "$value: result=$result")
         return result >= 0
     }
 

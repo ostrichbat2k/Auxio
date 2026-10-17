@@ -297,6 +297,15 @@
 
     <string name="set_audio">Audio</string>
     <string name="set_audio_desc">Configure sound and playback behavior</string>
+
+    <string name="set_usb">USB Audio</string>
+    <string name="set_usb_desc">Direct USB DAC status and activation log</string>
+    <string name="set_usb_device">Device</string>
+    <string name="set_usb_device_none">No USB audio device attached</string>
+    <string name="set_usb_retry">Retry activation</string>
+    <string name="set_usb_retry_desc">Re-run DAC setup for the attached device</string>
+    <string name="set_usb_log_category">Activation log</string>
+    <string name="set_usb_log_empty">Nothing logged yet -- plug in a USB DAC or tap Retry activation</string>
     <string name="set_playback">Playback</string>
     <string name="set_headset_autoplay">Headset autoplay</string>
     <string name="set_headset_autoplay_desc">Always start playing when a headset is connected (may not work on all devices)</string>

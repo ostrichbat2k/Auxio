@@ -26,6 +26,12 @@
         app:summary="@string/set_audio_desc"
         app:title="@string/set_audio" />
 
+    <Preference
+        app:icon="@drawable/ic_config_24"
+        app:key="@string/set_key_usb"
+        app:summary="@string/set_usb_desc"
+        app:title="@string/set_usb" />
+
     <PreferenceCategory app:title="@string/set_library">
 
         <org.oxycblt.auxio.settings.ui.WrappedDialogPreference

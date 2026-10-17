@@ -37,5 +37,20 @@ data class UacPlaybackTopology(
     val clockSourceId: Int,
     /** The Feature Unit gating the physical output (mute/volume), or -1 if none was found. */
     val outputFeatureUnitId: Int,
+    /**
+     * The Mixer Unit sitting between our USB input and [outputFeatureUnitId], if any (-1 if
+     * none) -- on at least one real device, the Feature Unit's mute/volume is NOT the only gate:
+     * the USB stream is first summed into a Mixer Unit alongside another source (e.g. the
+     * hardware mic/line-in), and that mixer's own per-input gain defaults to silence until set,
+     * independently of the Feature Unit downstream being correctly unmuted at unity.
+     */
+    val mixerUnitId: Int,
+    /**
+     * The 1-based input-channel number our USB terminal's first channel occupies on
+     * [mixerUnitId] (e.g. 1 for stereo if we're the first input pin), or -1 if [mixerUnitId] is
+     * -1 or we couldn't determine the offset (anything but the first pin requires summing
+     * preceding pins' channel counts via their Cluster Descriptors, which aren't parsed here).
+     */
+    val mixerInputChannelBase: Int,
     val formats: List<UacStreamFormat>,
 )
