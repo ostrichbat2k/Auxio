@@ -52,5 +52,20 @@ data class UacPlaybackTopology(
      * preceding pins' channel counts via their Cluster Descriptors, which aren't parsed here).
      */
     val mixerInputChannelBase: Int,
+    /**
+     * The UAC 3.0 Power Domain gating our USB input/output path, or -1 if none was found. UAC3
+     * introduced per-entity power management (D0/D1/D2); this device's real Linux kernel ALSA
+     * driver (sound/usb/power.c) explicitly wakes the relevant domain to D0 and waits out its
+     * declared recovery time before ever streaming to it -- something this codebase had never
+     * done at all until this was discovered via a full topology dump. Clean, 0-error USB
+     * transfers happening while the domain is still mid-wake would be silently discarded by the
+     * device's own (still-asleep) analog output stage, with nothing visible at the USB protocol
+     * level to show it.
+     */
+    val powerDomainId: Int,
+    /** D1->D0 recovery time in microseconds (waRecoveryTime1 * 50us), or 0 if unknown. */
+    val powerDomainD1RecoveryUs: Int,
+    /** D2->D0 recovery time in microseconds (waRecoveryTime2 * 50us), or 0 if unknown. */
+    val powerDomainD2RecoveryUs: Int,
     val formats: List<UacStreamFormat>,
 )

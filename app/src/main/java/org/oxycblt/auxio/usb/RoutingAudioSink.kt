@@ -36,18 +36,46 @@ import java.nio.ByteBuffer
  * instead at the first real `configure()` call -- which only happens once the user has navigated
  * the UI and started playback -- gives the background activation a realistic chance to finish
  * first, since that step itself is fast (under a second) once permission actually lands.
+ *
+ * [supportsFormat]/[getFormatSupport] must NOT commit to a delegate via [resolveForConfigure] --
+ * ExoPlayer calls these during track/format selection, which happens *before* [configure], and
+ * this genuinely did lose the race there even with the above fix: the sink got locked to the
+ * fallback the moment a format-support query ran before USB activation finished. They use [peek]
+ * instead, which checks USB availability fresh every call without ever caching.
+ *
+ * Even with that fixed, real playback was still observed going to the fallback sink indefinitely:
+ * the very *first* [configure] call for a freshly-launched player -- e.g. auto-resuming saved
+ * playback state right at app launch, well before USB permission has even been granted yet, let
+ * alone the DAC activated -- has every chance of losing this race too, and unlike the
+ * supportsFormat/getFormatSupport case there's no way around resolving *something* real inside
+ * configure() (the chosen sink actually needs configuring). The fix is to not treat the fallback
+ * as a permanent choice: [resolveForConfigure] re-checks USB availability on *every* call for as
+ * long as the current delegate is still the fallback, so losing the race on track 1 just means
+ * falling back to the speaker for that one track -- the next [configure] call (next track, or a
+ * seek/format change on the same one) gets another chance, instead of being stuck on the
+ * fallback for the rest of the player's lifetime. Once actually upgraded to the USB sink, it's
+ * never downgraded back -- only [reset] clears that (e.g. the device was unplugged).
  */
 class RoutingAudioSink(private val usbAudioManager: UsbAudioManager, private val fallback: AudioSink) :
     AudioSink {
     private var delegate: AudioSink? = null
     private var pendingListener: AudioSink.Listener? = null
 
-    private fun resolve(): AudioSink {
-        delegate?.let {
-            return it
+    /** Whatever's already been decided, defaulting to [fallback] without caching that default. */
+    private fun current(): AudioSink = delegate ?: fallback
+
+    private fun peek(): AudioSink = delegate ?: usbAudioManager.createAudioSink() ?: fallback
+
+    private fun resolveForConfigure(): AudioSink {
+        val existing = delegate
+        if (existing != null && existing !== fallback) {
+            // Already upgraded to USB; never go back down.
+            return existing
         }
         val chosen = usbAudioManager.createAudioSink() ?: fallback
-        pendingListener?.let(chosen::setListener)
+        if (chosen !== existing) {
+            pendingListener?.let(chosen::setListener)
+        }
         delegate = chosen
         return chosen
     }
@@ -57,62 +85,62 @@ class RoutingAudioSink(private val usbAudioManager: UsbAudioManager, private val
         delegate?.setListener(listener)
     }
 
-    override fun supportsFormat(format: Format): Boolean = resolve().supportsFormat(format)
+    override fun supportsFormat(format: Format): Boolean = peek().supportsFormat(format)
 
-    override fun getFormatSupport(format: Format): Int = resolve().getFormatSupport(format)
+    override fun getFormatSupport(format: Format): Int = peek().getFormatSupport(format)
 
-    override fun getCurrentPositionUs(sourceEnded: Boolean): Long = resolve().getCurrentPositionUs(sourceEnded)
+    override fun getCurrentPositionUs(sourceEnded: Boolean): Long = current().getCurrentPositionUs(sourceEnded)
 
     @Deprecated("Deprecated in AudioSink interface itself; this is still the signature callers use.")
     override fun configure(inputFormat: Format, specifiedBufferSize: Int, outputChannels: IntArray?) {
-        resolve().configure(inputFormat, specifiedBufferSize, outputChannels)
+        resolveForConfigure().configure(inputFormat, specifiedBufferSize, outputChannels)
     }
 
-    override fun play() = resolve().play()
+    override fun play() = current().play()
 
-    override fun handleDiscontinuity() = resolve().handleDiscontinuity()
+    override fun handleDiscontinuity() = current().handleDiscontinuity()
 
     override fun handleBuffer(
         buffer: ByteBuffer,
         presentationTimeUs: Long,
         encodedAccessUnitCount: Int,
-    ): Boolean = resolve().handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
+    ): Boolean = current().handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
 
-    override fun playToEndOfStream() = resolve().playToEndOfStream()
+    override fun playToEndOfStream() = current().playToEndOfStream()
 
-    override fun isEnded(): Boolean = resolve().isEnded()
+    override fun isEnded(): Boolean = current().isEnded()
 
-    override fun hasPendingData(): Boolean = resolve().hasPendingData()
+    override fun hasPendingData(): Boolean = current().hasPendingData()
 
     override fun setPlaybackParameters(playbackParameters: PlaybackParameters) =
-        resolve().setPlaybackParameters(playbackParameters)
+        current().setPlaybackParameters(playbackParameters)
 
-    override fun getPlaybackParameters(): PlaybackParameters = resolve().getPlaybackParameters()
+    override fun getPlaybackParameters(): PlaybackParameters = current().getPlaybackParameters()
 
     override fun setSkipSilenceEnabled(skipSilenceEnabled: Boolean) =
-        resolve().setSkipSilenceEnabled(skipSilenceEnabled)
+        current().setSkipSilenceEnabled(skipSilenceEnabled)
 
-    override fun getSkipSilenceEnabled(): Boolean = resolve().getSkipSilenceEnabled()
+    override fun getSkipSilenceEnabled(): Boolean = current().getSkipSilenceEnabled()
 
-    override fun setAudioAttributes(audioAttributes: AudioAttributes) = resolve().setAudioAttributes(audioAttributes)
+    override fun setAudioAttributes(audioAttributes: AudioAttributes) = current().setAudioAttributes(audioAttributes)
 
-    override fun getAudioAttributes(): AudioAttributes? = resolve().getAudioAttributes()
+    override fun getAudioAttributes(): AudioAttributes? = current().getAudioAttributes()
 
-    override fun setAudioSessionId(audioSessionId: Int) = resolve().setAudioSessionId(audioSessionId)
+    override fun setAudioSessionId(audioSessionId: Int) = current().setAudioSessionId(audioSessionId)
 
-    override fun setAuxEffectInfo(auxEffectInfo: AuxEffectInfo) = resolve().setAuxEffectInfo(auxEffectInfo)
+    override fun setAuxEffectInfo(auxEffectInfo: AuxEffectInfo) = current().setAuxEffectInfo(auxEffectInfo)
 
-    override fun getAudioTrackBufferSizeUs(): Long = resolve().audioTrackBufferSizeUs
+    override fun getAudioTrackBufferSizeUs(): Long = current().audioTrackBufferSizeUs
 
-    override fun enableTunnelingV21() = resolve().enableTunnelingV21()
+    override fun enableTunnelingV21() = current().enableTunnelingV21()
 
-    override fun disableTunneling() = resolve().disableTunneling()
+    override fun disableTunneling() = current().disableTunneling()
 
-    override fun setVolume(volume: Float) = resolve().setVolume(volume)
+    override fun setVolume(volume: Float) = current().setVolume(volume)
 
-    override fun pause() = resolve().pause()
+    override fun pause() = current().pause()
 
-    override fun flush() = resolve().flush()
+    override fun flush() = current().flush()
 
     override fun reset() {
         // Let the next configure() re-evaluate USB availability (e.g. a DAC plugged in or

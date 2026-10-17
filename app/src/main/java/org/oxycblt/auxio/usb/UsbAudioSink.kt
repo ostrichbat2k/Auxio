@@ -52,7 +52,19 @@ class UsbAudioSink(private val session: UsbAudioSession, private val format: Uac
     private companion object {
         const val PACKETS_PER_URB = 8
         const val NUM_URBS = 4
-        const val RING_BUFFER_MS = 500
+        // DecoderAudioRenderer.isReady() (the actual renderer driving playback) is just
+        // `audioSink.hasPendingData()` -- i.e. our hasPendingData() directly gates whether
+        // ExoPlayer considers the whole player READY or BUFFERING. DefaultAudioSink's equivalent
+        // checks a real AudioTrack's hardware buffer, which typically holds several seconds; our
+        // ring buffer at the old 500ms was thin enough that any ordinary decode-timing hiccup
+        // could drain it to empty, flipping isReady() to false and dropping the player into
+        // BUFFERING -- observed as playback randomly stalling ~20-60s in with zero errors
+        // anywhere (a legitimate state transition, not a failure) and never recovering, since a
+        // buffer this shallow may never satisfy whatever lookahead ExoPlayer's
+        // buffering-recovery logic wants before calling the renderer ready again. Matching
+        // DefaultAudioSink's actual depth removes the mismatch instead of guessing at the exact
+        // recovery threshold.
+        const val RING_BUFFER_MS = 5000
         const val CHANNELS = 2
         val SUPPORTED_SAMPLE_RATES = setOf(44100, 48000)
     }
@@ -71,6 +83,13 @@ class UsbAudioSink(private val session: UsbAudioSession, private val format: Uac
     private var isoHandle = 0L
     private var streamThread: Thread? = null
     @Volatile private var streaming = false
+
+    // Diagnostic: tracks whether the decoder has actually stopped calling handleBuffer(),
+    // versus the native iso layer legitimately running out of real data to send (both look
+    // identical from outside -- the ring buffer just sits at 0 -- but only one is actually our
+    // bug to fix).
+    @Volatile private var lastHandleBufferAtMs = 0L
+    @Volatile private var handleBufferCalls = 0L
 
     override fun setListener(listener: AudioSink.Listener) {
         this.listener = listener
@@ -94,22 +113,32 @@ class UsbAudioSink(private val session: UsbAudioSession, private val format: Uac
         if (supportsFormat(format)) AudioSink.SINK_FORMAT_SUPPORTED_DIRECTLY
         else AudioSink.SINK_FORMAT_UNSUPPORTED
 
-    override fun getCurrentPositionUs(sourceEnded: Boolean): Long =
-        if (sampleRateHz == 0) AudioSink.CURRENT_POSITION_NOT_SET
-        else framesWritten * 1_000_000L / sampleRateHz
+    override fun getCurrentPositionUs(sourceEnded: Boolean): Long {
+        val result =
+            if (sampleRateHz == 0) AudioSink.CURRENT_POSITION_NOT_SET
+            else framesWritten * 1_000_000L / sampleRateHz
+        L.i(
+            "USB DEBUG: getCurrentPositionUs() sink=${System.identityHashCode(this)} " +
+                "sourceEnded=$sourceEnded sampleRateHz=$sampleRateHz framesWritten=$framesWritten " +
+                "result=$result")
+        return result
+    }
 
     @Deprecated("Deprecated in AudioSink interface itself; this is still the signature callers use.")
     override fun configure(inputFormat: Format, specifiedBufferSize: Int, outputChannels: IntArray?) {
         if (!supportsFormat(inputFormat)) {
             throw AudioSink.ConfigurationException("Unsupported format: $inputFormat", inputFormat)
         }
-        L.i("UsbAudioSink: configured for $inputFormat")
+        L.i("UsbAudioSink: configured for $inputFormat, sink=${System.identityHashCode(this)}")
 
         if (streaming && sampleRateHz == inputFormat.sampleRate) {
-            // Already streaming at the right rate (e.g. a flush/seek within the same track);
-            // nothing to reconfigure.
-            framesWritten = 0L
-            ended = false
+            // Already streaming at the right rate (ExoPlayer calls configure() again with an
+            // identical format periodically during otherwise normal playback, roughly every
+            // 30-60s observed here, not just on an actual seek/flush) -- genuinely nothing to
+            // reconfigure. Previously this branch still zeroed framesWritten/ended despite its
+            // own comment saying there was nothing to do, which made getCurrentPositionUs()
+            // jump back to 0 on every one of those redundant calls -- a real seek's position
+            // reset is already handled by flush(), so this branch doesn't need to duplicate it.
             return
         }
 
@@ -125,6 +154,20 @@ class UsbAudioSink(private val session: UsbAudioSession, private val format: Uac
         if (!clockOk) {
             throw AudioSink.ConfigurationException(
                 "Failed to set DAC clock to $sampleRateHz Hz", inputFormat)
+        }
+
+        // See UsbAudioManager.activateDac's comment on wakePowerDomain for why: a clean,
+        // 0-error transfer into a UAC3 Power Domain that's still mid-wake (or never woken at
+        // all) looks identical, at the USB protocol level, to one going to a fully-powered
+        // device. Unlike reassertKernelEviction below, this is safe to call again here -- it's
+        // a power-state control transfer, not an interface claim, so it can't reset alt-setting.
+        val powerDomainId = session.topology.powerDomainId
+        if (powerDomainId >= 0) {
+            UsbAudioController.wakePowerDomain(
+                session,
+                powerDomainId,
+                session.topology.powerDomainD1RecoveryUs,
+                session.topology.powerDomainD2RecoveryUs)
         }
 
         // Re-check mute/volume after every clock change: unknown whether reconfiguring the
@@ -156,6 +199,7 @@ class UsbAudioSink(private val session: UsbAudioSession, private val format: Uac
     override fun play() {
         // The streaming thread runs continuously once configured; starting playback just means
         // real data will start showing up in handleBuffer() instead of silence being streamed.
+        L.i("UsbAudioSink: play()")
     }
 
     override fun handleDiscontinuity() {
@@ -168,12 +212,17 @@ class UsbAudioSink(private val session: UsbAudioSession, private val format: Uac
         presentationTimeUs: Long,
         encodedAccessUnitCount: Int,
     ): Boolean {
+        lastHandleBufferAtMs = System.currentTimeMillis()
+        handleBufferCalls++
         val written = ringBuffer.write(buffer)
         framesWritten += written / bytesPerFrame
         return !buffer.hasRemaining()
     }
 
     override fun playToEndOfStream() {
+        L.i(
+            "UsbAudioSink: playToEndOfStream(), ${ringBuffer.availableToRead()} bytes still " +
+                "buffered, ${System.currentTimeMillis() - lastHandleBufferAtMs}ms since last handleBuffer()")
         if (ringBuffer.availableToRead() == 0) {
             ended = true
         }
@@ -224,15 +273,18 @@ class UsbAudioSink(private val session: UsbAudioSession, private val format: Uac
     override fun pause() {
         // Let the ring buffer run dry; the streaming thread zero-pads once it's empty, so the
         // USB isochronous schedule (which must not stop) just carries silence.
+        L.i("UsbAudioSink: pause()")
     }
 
     override fun flush() {
+        L.i("UsbAudioSink: flush()")
         ringBuffer.clear()
         framesWritten = 0L
         ended = false
     }
 
     override fun reset() {
+        L.i("UsbAudioSink: reset()")
         stopStreamingThread()
         ringBuffer.clear()
     }
@@ -295,7 +347,9 @@ class UsbAudioSink(private val session: UsbAudioSession, private val format: Uac
                             if (submitted % 500 == 0) {
                                 L.i(
                                     "UsbAudioSink: $submitted URBs submitted, $reapErrors reap " +
-                                        "errors, ${ringBuffer.availableToRead()} bytes buffered")
+                                        "errors, ${ringBuffer.availableToRead()} bytes buffered, " +
+                                        "$handleBufferCalls handleBuffer() calls, " +
+                                        "${System.currentTimeMillis() - lastHandleBufferAtMs}ms since last one")
                             }
                         }
                     }

@@ -63,6 +63,11 @@ object UsbAudioController {
     private const val CS_CLOCK_VALID_CONTROL = 0x02
     private const val FU_MUTE_CONTROL = 0x01
     private const val FU_VOLUME_CONTROL = 0x02
+    private const val AC_POWER_DOMAIN_CONTROL = 0x02
+
+    const val PD_STATE_D0 = 0
+    const val PD_STATE_D1 = 1
+    const val PD_STATE_D2 = 2
 
     /** Opens, configures, and claims the interfaces for [device]'s UAC3 playback topology. */
     fun activate(context: Context, device: UsbDevice, topology: UacPlaybackTopology): UsbAudioSession? {
@@ -402,6 +407,70 @@ object UsbAudioController {
             "SET_CUR mixer gain (unit=$mixerUnitId in=$inputChannel out=$outputChannel) to " +
                 "$value: result=$result")
         return result >= 0
+    }
+
+    /** Reads a UAC 3.0 Power Domain's current state (0=D0/full power, 1=D1, 2=D2), or null. */
+    fun getPowerDomainState(session: UsbAudioSession, powerDomainId: Int): Int? {
+        val buffer = ByteArray(1)
+        val wValue = AC_POWER_DOMAIN_CONTROL shl 8
+        val wIndex = (powerDomainId shl 8) or session.controlInterface.id
+        val result =
+            session.connection.controlTransfer(
+                REQ_TYPE_CLASS_INTERFACE_GET, UAC_REQUEST_CUR, wValue, wIndex, buffer, buffer.size, 1000)
+        if (result != 1) {
+            L.w("GET_CUR power domain state (id=$powerDomainId) failed: result=$result")
+            return null
+        }
+        return buffer[0].toInt() and 0xFF
+    }
+
+    /** Sets a UAC 3.0 Power Domain's state. Does not wait out any recovery time itself. */
+    fun setPowerDomainState(session: UsbAudioSession, powerDomainId: Int, state: Int): Boolean {
+        val wValue = AC_POWER_DOMAIN_CONTROL shl 8
+        val wIndex = (powerDomainId shl 8) or session.controlInterface.id
+        val buffer = byteArrayOf(state.toByte())
+        val result =
+            session.connection.controlTransfer(
+                REQ_TYPE_CLASS_INTERFACE_SET, UAC_REQUEST_CUR, wValue, wIndex, buffer, buffer.size, 1000)
+        L.i("SET_CUR power domain state (id=$powerDomainId) to $state: result=$result")
+        return result >= 0
+    }
+
+    /**
+     * Wakes [powerDomainId] to D0 (full power) if it isn't already there, then blocks for
+     * exactly as long as the device itself declared it needs to actually be ready -- mirroring
+     * the real Linux kernel driver (sound/usb/power.c: snd_usb_power_domain_set), which performs
+     * this exact GET-then-SET-then-wait sequence before ever streaming to a UAC 3.0 device.
+     * This codebase never did any of this before it was discovered via a full topology dump;
+     * every previous "clean transfer, no sound" run could plausibly have been streaming into a
+     * domain that was still asleep, or mid-wake, the whole time -- with absolutely nothing
+     * visible about that at the USB protocol level, since isochronous OUT has no handshake to
+     * reveal it either way.
+     */
+    fun wakePowerDomain(session: UsbAudioSession, powerDomainId: Int, d1RecoveryUs: Int, d2RecoveryUs: Int) {
+        val current = getPowerDomainState(session, powerDomainId)
+        if (current == null) {
+            L.w("Could not read power domain $powerDomainId state; skipping wake")
+            return
+        }
+        if (current == PD_STATE_D0) {
+            L.i("Power domain $powerDomainId already in D0")
+            return
+        }
+        if (!setPowerDomainState(session, powerDomainId, PD_STATE_D0)) {
+            L.w("Failed to set power domain $powerDomainId to D0")
+            return
+        }
+        val recoveryUs =
+            when (current) {
+                PD_STATE_D1 -> d1RecoveryUs
+                PD_STATE_D2 -> d2RecoveryUs
+                else -> 0
+            }
+        L.i("Power domain $powerDomainId: D$current -> D0, waiting ${recoveryUs}us")
+        if (recoveryUs > 0) {
+            Thread.sleep(recoveryUs / 1000L, (recoveryUs % 1000L * 1000).toInt())
+        }
     }
 
     /** Switches the streaming interface to the alternate setting for [format]. */

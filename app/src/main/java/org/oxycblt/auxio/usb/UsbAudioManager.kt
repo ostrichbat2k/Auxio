@@ -200,11 +200,25 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
     private fun UsbDevice.isAudioDevice(): Boolean =
         (0 until interfaceCount).any { getInterface(it).interfaceClass == UsbConstants.USB_CLASS_AUDIO }
 
+    // Auxio builds two renderers (FFmpeg-preferred, MediaCodec-fallback), each wrapping its own
+    // RoutingAudioSink -- and both get queried (supportsFormat/getFormatSupport, and apparently
+    // position) by ExoPlayer's renderer machinery, not just whichever one actually ends up
+    // streaming. createAudioSink() returning a *fresh* UsbAudioSink per call meant each
+    // RoutingAudioSink got its own, separate instance: one got genuinely configured and streamed
+    // correctly, but the other sat forever unconfigured (sampleRateHz=0), and its
+    // getCurrentPositionUs() dutifully reporting AudioSink.CURRENT_POSITION_NOT_SET
+    // (Long.MIN_VALUE) seems to be exactly what corrupted the player's overall position
+    // tracking -- observed as it jumping to nonsense values like -999999475 before stalling.
+    // Caching a single instance per session, shared across both RoutingAudioSinks, means
+    // whichever one actually gets used reports real progress to *both* callers.
+    @Volatile private var activeSink: UsbAudioSink? = null
+
     /** Returns an [AudioSink] wired to the active DAC session, or null if none is ready. */
     fun createAudioSink(): AudioSink? {
+        activeSink?.let { return it }
         val session = activeSession ?: return null
         val format = activeFormat ?: return null
-        return UsbAudioSink(session, format)
+        return UsbAudioSink(session, format).also { activeSink = it }
     }
 
     private fun activateDac(device: UsbDevice) {
@@ -220,6 +234,9 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
                 val bytes = UsbAudioDescriptorParser.fetchConfigurationDescriptor(connection, i) ?: continue
                 UsbAudioDescriptorParser.dumpAcTopology(bytes)
                 UsbAudioDescriptorParser.parseUac3Playback(bytes)?.let { topology = it }
+                if (topology == null) {
+                    UsbAudioDescriptorParser.parseUac2Playback(bytes)?.let { topology = it }
+                }
             }
         } finally {
             connection.close()
@@ -245,6 +262,20 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
         if (session == null) {
             logEvent("Failed to activate UAC3 session for ${device.deviceName}")
             return
+        }
+
+        // Do this before anything else: its recovery wait (up to 300ms for a D2->D0 wake, per
+        // this device's own declared waRecoveryTime2) should overlap with -- not follow -- the
+        // rest of setup below, and nothing else here is safe to skip past a domain that might
+        // still be asleep.
+        if (found.powerDomainId >= 0) {
+            UsbAudioController.wakePowerDomain(
+                session, found.powerDomainId, found.powerDomainD1RecoveryUs, found.powerDomainD2RecoveryUs)
+            logEvent(
+                "Power domain ${found.powerDomainId} woken (d1=${found.powerDomainD1RecoveryUs}us " +
+                    "d2=${found.powerDomainD2RecoveryUs}us)")
+        } else {
+            logEvent("No power domain found covering our USB input")
         }
 
         val clockOk = UsbAudioController.setClockFrequency(session, SUPPORTED_SAMPLE_RATE_HZ)
@@ -312,21 +343,20 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
             return
         }
 
-        // Diagnostic: confirm the updated (variable-packet-length) native pipeline still
-        // produces audible output at 44100 Hz on its own, isolating whether a problem is in that
-        // pipeline versus the AudioSink/real-decoded-PCM integration built on top of it.
+        // Give the clock/alt-setting/power-domain changes above a moment to actually settle
+        // before marking the session ready. Do NOT call reassertKernelEviction after
+        // selectFormat -- see the comment above that call for why.
         //
-        // The silence turned out to be intermittent, not a fixed code regression: the same build
-        // was confirmed both audible and silent across repeated runs with no code change in
-        // between. Hypothesis: the clock/alt-setting switch just above needs some settling time
-        // on this hardware before it's actually ready to render, and streaming immediately after
-        // sometimes races ahead of that. DAC_SETTLE_DELAY_MS gives it a moment before the first
-        // packet goes out. Do NOT call reassertKernelEviction after selectFormat -- see the
-        // comment above that call for why.
+        // Deliberately NOT running IsoToneTest here anymore: it was a useful one-off diagnostic
+        // (a blocking 3-second tone test) while chasing the intermittent-silence investigation,
+        // but running it on every single activation pushed "DAC session ready" out by 3+ seconds
+        // -- which, in real playback, is 3+ seconds RoutingAudioSink's configure() could get
+        // called first and commit to the fallback (AudioTrack/speaker) sink before this ever
+        // finishes, exactly what was observed (tracks playing through the tablet speaker). The
+        // settings screen's "Retry activation" + its live controls now cover manual diagnosis
+        // instead.
         Thread.sleep(DAC_SETTLE_DELAY_MS)
-        logEvent("Clock valid before streaming: ${UsbAudioController.getClockValid(session)}")
-        IsoToneTest.play(session, format, 48000, durationMs = 3000)
-        logEvent("Clock valid after streaming: ${UsbAudioController.getClockValid(session)}")
+        logEvent("Clock valid: ${UsbAudioController.getClockValid(session)}")
 
         activeSession = session
         activeFormat = format
@@ -410,6 +440,7 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
         activeSession?.let { UsbAudioController.release(it) }
         activeSession = null
         activeFormat = null
+        activeSink = null
         _controlState.value = null
     }
 

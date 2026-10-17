@@ -469,6 +469,13 @@ class ExoPlaybackStateHolder(
 
     override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
         super.onPlayWhenReadyChanged(playWhenReady, reason)
+        L.i(
+            "USB DEBUG: onPlayWhenReadyChanged($playWhenReady, reason=$reason) " +
+                "[USER_REQUEST=${Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST} " +
+                "AUDIO_FOCUS_LOSS=${Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS} " +
+                "AUDIO_BECOMING_NOISY=${Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_BECOMING_NOISY} " +
+                "REMOTE=${Player.PLAY_WHEN_READY_CHANGE_REASON_REMOTE} " +
+                "END_OF_MEDIA_ITEM=${Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM}]")
 
         if (player.playWhenReady) {
             // Mark that we have started playing so that the notification can now be posted.
@@ -491,6 +498,12 @@ class ExoPlaybackStateHolder(
 
     override fun onPlaybackStateChanged(playbackState: Int) {
         super.onPlaybackStateChanged(playbackState)
+        L.i(
+            "USB DEBUG: onPlaybackStateChanged($playbackState) " +
+                "[IDLE=${Player.STATE_IDLE} BUFFERING=${Player.STATE_BUFFERING} " +
+                "READY=${Player.STATE_READY} ENDED=${Player.STATE_ENDED}] " +
+                "repeatMode=${player.repeatMode} currentPosition=${player.currentPosition} " +
+                "duration=${player.duration}")
 
         if (playbackState == Player.STATE_ENDED && player.repeatMode == Player.REPEAT_MODE_OFF) {
             goto(0)

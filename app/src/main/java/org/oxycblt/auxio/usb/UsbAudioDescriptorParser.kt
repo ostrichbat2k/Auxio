@@ -43,6 +43,7 @@ object UsbAudioDescriptorParser {
     private const val AC_SUBCLASS = 1
     private const val AS_SUBCLASS = 2
     private const val UAC3_PROTOCOL = 0x30
+    private const val UAC2_PROTOCOL = 0x20
 
     // AudioControl class-specific interface descriptor subtypes (UAC 3.0). These differ from
     // UAC 1.0/2.0's subtype numbers (e.g. FEATURE_UNIT is 6 in UAC2 but 7 in UAC3).
@@ -57,11 +58,26 @@ object UsbAudioDescriptorParser {
     private const val AC_CLOCK_SOURCE = 0x0B
     private const val AC_CLOCK_SELECTOR = 0x0C
     private const val AC_CLOCK_MULTIPLIER = 0x0D
+    private const val AC_POWER_DOMAIN = 0x10
+
+    // AudioControl class-specific interface descriptor subtypes (UAC 2.0 -- confirmed against
+    // the Linux kernel's include/linux/usb/audio-v2.h). INPUT_TERMINAL/OUTPUT_TERMINAL are
+    // shared with UAC 1.0, everything else here shifts down by one slot relative to UAC 3.0
+    // (e.g. FEATURE_UNIT is 6, not 7) since UAC 3.0 inserted EXTENDED_TERMINAL. No Power Domain
+    // concept exists in UAC 2.0 -- that's a UAC 3.0-only addition.
+    private const val AC2_MIXER_UNIT = 0x04
+    private const val AC2_SELECTOR_UNIT = 0x05
+    private const val AC2_FEATURE_UNIT = 0x06
+    private const val AC2_CLOCK_SOURCE = 0x0A
 
     // AudioStreaming class-specific interface descriptor subtype (UAC 3.0). Unlike UAC 1.0/2.0,
     // UAC 3.0 folds format info directly into AS_GENERAL rather than a separate FORMAT_TYPE
     // descriptor.
     private const val AS_GENERAL = 0x01
+    // UAC 2.0's AS_GENERAL (same subtype number, different/shorter struct) carries the format
+    // info as a bitmap rather than inline bit-resolution fields, so the actual PCM parameters
+    // come from a separate FORMAT_TYPE descriptor that follows it.
+    private const val AS2_FORMAT_TYPE = 0x02
 
     private const val TERMINAL_USB_STREAMING = 0x0101
 
@@ -112,9 +128,14 @@ object UsbAudioDescriptorParser {
                     currentInterfaceProtocol = bytes.u8(7)
                 }
                 DESC_TYPE_CS_INTERFACE -> {
-                    if (currentInterfaceSubClass != AC_SUBCLASS || currentInterfaceProtocol != UAC3_PROTOCOL) {
+                    if (currentInterfaceSubClass != AC_SUBCLASS ||
+                        (currentInterfaceProtocol != UAC3_PROTOCOL && currentInterfaceProtocol != UAC2_PROTOCOL)) {
                         continue
                     }
+                    // Subtype numbers below are UAC 3.0's; on a UAC 2.0 interface
+                    // (currentInterfaceProtocol == UAC2_PROTOCOL) they're shifted by one slot
+                    // (see parseUac2Playback's docs), so this falls through to the raw hex dump
+                    // for those -- still enough to see the entity graph, just not named.
                     val subtype = bytes.u8(2)
                     val hex = bytes.joinToString(" ") { "%02x".format(it) }
                     val desc =
@@ -153,6 +174,12 @@ object UsbAudioDescriptorParser {
                                     "sources=${(0 until nrIn).map { bytes.u8(5 + it) }}"
                             }
                             AC_CLOCK_MULTIPLIER -> "CLOCK_MULTIPLIER id=${bytes.u8(3)} bCSourceID=${bytes.u8(4)}"
+                            AC_POWER_DOMAIN -> {
+                                val nrEntities = bytes.u8(8)
+                                "POWER_DOMAIN id=${bytes.u8(3)} " +
+                                    "d1d0RecoveryUs=${bytes.u16(4) * 50} d2d0RecoveryUs=${bytes.u16(6) * 50} " +
+                                    "entities=${(0 until nrEntities).map { bytes.u8(9 + it) }}"
+                            }
                             else -> "subtype=0x${"%02x".format(subtype)}"
                         }
                     L.i("AC topology [iface $currentInterfaceNumber]: $desc  (raw: $hex)")
@@ -201,6 +228,11 @@ object UsbAudioDescriptorParser {
         var outputFeatureUnitId = -1
         var mixerUnitId = -1
         var mixerInputChannelBase = -1
+        // Power Domains can appear anywhere relative to the entities they cover (in this
+        // device's descriptors, they're last), so collect all of them and resolve against
+        // usbStreamingTerminalId after the full walk instead of relying on ordering.
+        data class PowerDomainInfo(val id: Int, val d1RecoveryUs: Int, val d2RecoveryUs: Int, val entityIds: List<Int>)
+        val powerDomains = mutableListOf<PowerDomainInfo>()
 
         val formatsByInterface = mutableMapOf<Int, MutableList<UacStreamFormat>>()
         var pendingAltSetting = -1
@@ -291,6 +323,15 @@ object UsbAudioDescriptorParser {
                                     mixerInputChannelBase = if (pin == 0) 1 else -1
                                 }
                             }
+                            AC_POWER_DOMAIN -> {
+                                val nrEntities = bytes.u8(8)
+                                powerDomains.add(
+                                    PowerDomainInfo(
+                                        id = bytes.u8(3),
+                                        d1RecoveryUs = bytes.u16(4) * 50,
+                                        d2RecoveryUs = bytes.u16(6) * 50,
+                                        entityIds = (0 until nrEntities).map { bytes.u8(9 + it) }))
+                            }
                         }
                     } else if (currentInterfaceSubClass == AS_SUBCLASS &&
                         currentInterfaceProtocol == UAC3_PROTOCOL &&
@@ -329,6 +370,8 @@ object UsbAudioDescriptorParser {
             return null
         }
 
+        val powerDomain = powerDomains.firstOrNull { usbStreamingTerminalId in it.entityIds }
+
         return UacPlaybackTopology(
             configurationValue = configurationValue,
             controlInterfaceNumber = controlInterfaceNumber,
@@ -337,6 +380,190 @@ object UsbAudioDescriptorParser {
             outputFeatureUnitId = outputFeatureUnitId,
             mixerUnitId = mixerUnitId,
             mixerInputChannelBase = mixerInputChannelBase,
+            powerDomainId = powerDomain?.id ?: -1,
+            powerDomainD1RecoveryUs = powerDomain?.d1RecoveryUs ?: 0,
+            powerDomainD2RecoveryUs = powerDomain?.d2RecoveryUs ?: 0,
+            formats = formats)
+    }
+
+    /**
+     * Same idea as [parseUac3Playback], for UAC 2.0 devices -- most real-world USB DACs (this
+     * was discovered testing against one: a FiiO Snowsky Tiny A, bInterfaceProtocol 0x20, which
+     * the UAC-3.0-only parser above found nothing at all for). Confirmed against the Linux
+     * kernel's audio-v2.h rather than derived from the spec alone, same as the UAC3 parser's
+     * approach.
+     *
+     * The main structural differences from UAC 3.0: every AC unit/terminal subtype number shifts
+     * down by one slot (UAC 3.0 inserted EXTENDED_TERMINAL at 0x04), there's no Power Domain
+     * concept at all, and -- the one that actually matters for parsing -- UAC 2.0's AS_GENERAL
+     * descriptor doesn't carry bit-resolution/subslot-size inline; those come from a separate
+     * FORMAT_TYPE descriptor that follows it in the same interface block. It does carry
+     * bNrChannels directly on the Input Terminal, though, which UAC 3.0 can't (that's pushed
+     * into a separate Cluster Descriptor fetch) -- meaning mixerInputChannelBase can be computed
+     * exactly here instead of only for a Mixer Unit's first input pin.
+     */
+    fun parseUac2Playback(configBytes: ByteArray): UacPlaybackTopology? {
+        val entries = walk(configBytes)
+
+        var configurationValue = 0
+        var currentInterfaceNumber = -1
+        var currentAltSetting = -1
+        var currentInterfaceClass = -1
+        var currentInterfaceSubClass = -1
+        var currentInterfaceProtocol = -1
+
+        var controlInterfaceNumber = -1
+        var streamingInterfaceNumber = -1
+        var clockSourceId = -1
+        var usbStreamingTerminalId = -1
+        var outputFeatureUnitId = -1
+        var mixerUnitId = -1
+        var mixerInputChannelBase = -1
+
+        // Channel count of every Input Terminal seen so far, by terminal id -- used to compute
+        // the exact base channel number for whichever pin on the Mixer Unit our USB terminal
+        // occupies (summing the channel counts of every preceding pin's source).
+        val terminalChannelCounts = mutableMapOf<Int, Int>()
+
+        val formatsByInterface = mutableMapOf<Int, MutableList<UacStreamFormat>>()
+        var pendingAltSetting = -1
+        var pendingEndpointAddress = -1
+        var pendingEndpointSync = -1
+        var pendingMaxPacketSize = -1
+        var pendingBitResolution = -1
+        var pendingSubslotSize = -1
+        var isPendingTerminalLinked = false
+
+        fun flushPendingFormat(interfaceNumber: Int) {
+            if (pendingAltSetting >= 0 && pendingEndpointAddress >= 0 && pendingBitResolution > 0) {
+                formatsByInterface
+                    .getOrPut(interfaceNumber) { mutableListOf() }
+                    .add(
+                        UacStreamFormat(
+                            alternateSetting = pendingAltSetting,
+                            bitResolution = pendingBitResolution,
+                            subslotSize = pendingSubslotSize,
+                            clusterDescriptorId = -1,
+                            endpointAddress = pendingEndpointAddress,
+                            maxPacketSize = pendingMaxPacketSize,
+                            isAsync = pendingEndpointSync == SYNC_TYPE_ASYNC))
+            }
+            pendingAltSetting = -1
+            pendingEndpointAddress = -1
+            pendingEndpointSync = -1
+            pendingMaxPacketSize = -1
+            pendingBitResolution = -1
+            pendingSubslotSize = -1
+            isPendingTerminalLinked = false
+        }
+
+        for ((type, bytes) in entries) {
+            when (type) {
+                DESC_TYPE_CONFIGURATION -> {
+                    configurationValue = bytes.u8(5)
+                }
+                DESC_TYPE_INTERFACE -> {
+                    if (currentInterfaceNumber == streamingInterfaceNumber) {
+                        flushPendingFormat(currentInterfaceNumber)
+                    }
+                    currentInterfaceNumber = bytes.u8(2)
+                    currentAltSetting = bytes.u8(3)
+                    currentInterfaceClass = bytes.u8(5)
+                    currentInterfaceSubClass = bytes.u8(6)
+                    currentInterfaceProtocol = bytes.u8(7)
+                    if (currentInterfaceProtocol == UAC2_PROTOCOL && currentInterfaceSubClass == AS_SUBCLASS) {
+                        pendingAltSetting = currentAltSetting
+                    }
+                }
+                DESC_TYPE_CS_INTERFACE -> {
+                    if (currentInterfaceClass != UsbConstants.USB_CLASS_AUDIO) continue
+                    val subtype = bytes.u8(2)
+                    if (currentInterfaceSubClass == AC_SUBCLASS && currentInterfaceProtocol == UAC2_PROTOCOL) {
+                        controlInterfaceNumber = currentInterfaceNumber
+                        when (subtype) {
+                            AC_INPUT_TERMINAL -> {
+                                val terminalId = bytes.u8(3)
+                                val terminalType = bytes.u16(4)
+                                terminalChannelCounts[terminalId] = bytes.u8(8) // bNrChannels
+                                if (terminalType == TERMINAL_USB_STREAMING) {
+                                    usbStreamingTerminalId = terminalId
+                                }
+                            }
+                            AC2_CLOCK_SOURCE -> {
+                                if (clockSourceId < 0) clockSourceId = bytes.u8(3)
+                            }
+                            AC_OUTPUT_TERMINAL -> {
+                                val terminalType = bytes.u16(4)
+                                if (terminalType != TERMINAL_USB_STREAMING && outputFeatureUnitId < 0) {
+                                    outputFeatureUnitId = bytes.u8(7) // bSourceID
+                                }
+                            }
+                            AC2_MIXER_UNIT -> {
+                                val nrIn = bytes.u8(4)
+                                val sources = (0 until nrIn).map { bytes.u8(5 + it) }
+                                val pin = sources.indexOf(usbStreamingTerminalId)
+                                if (pin >= 0) {
+                                    mixerUnitId = bytes.u8(3)
+                                    mixerInputChannelBase =
+                                        1 + sources.take(pin).sumOf { terminalChannelCounts[it] ?: 0 }
+                                }
+                            }
+                        }
+                    } else if (currentInterfaceSubClass == AS_SUBCLASS &&
+                        currentInterfaceProtocol == UAC2_PROTOCOL) {
+                        when (subtype) {
+                            AS_GENERAL -> {
+                                val terminalLink = bytes.u8(3)
+                                isPendingTerminalLinked = terminalLink == usbStreamingTerminalId
+                                if (isPendingTerminalLinked) {
+                                    streamingInterfaceNumber = currentInterfaceNumber
+                                }
+                            }
+                            AS2_FORMAT_TYPE -> {
+                                if (isPendingTerminalLinked) {
+                                    pendingSubslotSize = bytes.u8(4) // bSubslotSize
+                                    pendingBitResolution = bytes.u8(5) // bBitResolution
+                                }
+                            }
+                        }
+                    }
+                }
+                DESC_TYPE_ENDPOINT -> {
+                    if (currentInterfaceNumber == streamingInterfaceNumber) {
+                        pendingEndpointAddress = bytes.u8(2)
+                        val attributes = bytes.u8(3)
+                        pendingEndpointSync = (attributes shr 2) and 0x3
+                        pendingMaxPacketSize = bytes.u16(4)
+                    }
+                }
+            }
+        }
+        flushPendingFormat(currentInterfaceNumber)
+
+        if (controlInterfaceNumber < 0 || streamingInterfaceNumber < 0 || clockSourceId < 0) {
+            L.d(
+                "No UAC2 playback topology in this configuration " +
+                    "(control=$controlInterfaceNumber streaming=$streamingInterfaceNumber clock=$clockSourceId)")
+            return null
+        }
+
+        val formats = formatsByInterface[streamingInterfaceNumber].orEmpty()
+        if (formats.isEmpty()) {
+            L.w("No streaming formats found for interface $streamingInterfaceNumber")
+            return null
+        }
+
+        return UacPlaybackTopology(
+            configurationValue = configurationValue,
+            controlInterfaceNumber = controlInterfaceNumber,
+            streamingInterfaceNumber = streamingInterfaceNumber,
+            clockSourceId = clockSourceId,
+            outputFeatureUnitId = outputFeatureUnitId,
+            mixerUnitId = mixerUnitId,
+            mixerInputChannelBase = mixerInputChannelBase,
+            powerDomainId = -1,
+            powerDomainD1RecoveryUs = 0,
+            powerDomainD2RecoveryUs = 0,
             formats = formats)
     }
 }
