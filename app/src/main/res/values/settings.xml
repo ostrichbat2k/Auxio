@@ -8,7 +8,12 @@
     <string name="set_key_usb" translatable="false">auxio_usb</string>
     <string name="set_key_usb_device" translatable="false">auxio_usb_device</string>
     <string name="set_key_usb_retry" translatable="false">auxio_usb_retry</string>
+    <string name="set_key_usb_controls_category" translatable="false">auxio_usb_controls_category</string>
     <string name="set_key_usb_log_category" translatable="false">auxio_usb_log_category</string>
+    <string name="set_key_usb_format" translatable="false">auxio_usb_format</string>
+    <string name="set_key_usb_mute" translatable="false">auxio_usb_mute</string>
+    <string name="set_key_usb_volume" translatable="false">auxio_usb_volume</string>
+    <string name="set_key_usb_mixer_gain_prefix" translatable="false">auxio_usb_mixer_gain_</string>
 
     <string name="set_key_theme" translatable="false">KEY_THEME2</string>
     <string name="set_key_black_theme" translatable="false">KEY_BLACK_THEME</string>

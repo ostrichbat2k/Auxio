@@ -304,6 +304,12 @@
     <string name="set_usb_device_none">No USB audio device attached</string>
     <string name="set_usb_retry">Retry activation</string>
     <string name="set_usb_retry_desc">Re-run DAC setup for the attached device</string>
+    <string name="set_usb_controls_category">Controls</string>
+    <string name="set_usb_controls_none">No active USB DAC session -- controls will appear here once one activates</string>
+    <string name="set_usb_format">Format</string>
+    <string name="set_usb_mute">Mute</string>
+    <string name="set_usb_volume">Volume (1/256 dB)</string>
+    <string name="set_usb_mixer_gain">Mixer gain in %1$d → out %2$d (1/256 dB)</string>
     <string name="set_usb_log_category">Activation log</string>
     <string name="set_usb_log_empty">Nothing logged yet -- plug in a USB DAC or tap Retry activation</string>
     <string name="set_playback">Playback</string>

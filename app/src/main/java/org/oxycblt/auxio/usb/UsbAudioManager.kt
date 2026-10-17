@@ -72,6 +72,16 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
         _diagnosticLog.value = (listOf("$stamp  $message") + _diagnosticLog.value).take(LOG_CAPACITY)
     }
 
+    private val _controlState = MutableStateFlow<UsbControlState?>(null)
+    /** Live, read-back-from-the-device state of the active session's adjustable controls. */
+    val controlState: StateFlow<UsbControlState?> = _controlState.asStateFlow()
+
+    // In-memory only: which bit resolution to prefer when multiple formats are offered. Not
+    // persisted across process death since changing it re-activates immediately anyway; a
+    // settings-screen choice only has user-visible meaning while that screen (or the session it
+    // started) is still around to show the effect.
+    @Volatile private var preferredBitResolution: Int = 16
+
     @Volatile private var activeSession: UsbAudioSession? = null
     @Volatile private var activeFormat: UacStreamFormat? = null
 
@@ -220,9 +230,11 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
             logEvent("No UAC3 playback topology found on ${device.deviceName}")
             return
         }
-        val format = found.formats.firstOrNull { it.bitResolution == 16 }
+        val format =
+            found.formats.firstOrNull { it.bitResolution == preferredBitResolution }
+                ?: found.formats.firstOrNull()
         if (format == null) {
-            logEvent("No 16-bit format available for ${device.deviceName}")
+            logEvent("No usable format available for ${device.deviceName}")
             return
         }
         logEvent(
@@ -318,13 +330,87 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
 
         activeSession = session
         activeFormat = format
+        refreshControlState(session, format, device.productName ?: device.deviceName)
         logEvent("DAC session ready: $format at $SUPPORTED_SAMPLE_RATE_HZ Hz")
+    }
+
+    /** Re-reads every adjustable control from the device and republishes [controlState]. */
+    private fun refreshControlState(session: UsbAudioSession, format: UacStreamFormat, deviceName: String) {
+        val mixerUnitId = session.topology.mixerUnitId
+        val mixerBase = session.topology.mixerInputChannelBase
+        val mixerChannels =
+            if (mixerUnitId >= 0 && mixerBase >= 0) {
+                (mixerBase until mixerBase + 2).flatMap { inCh -> (1..2).map { outCh -> inCh to outCh } }
+            } else {
+                emptyList()
+            }
+        val mixerGains =
+            mixerChannels.associateWith { (inCh, outCh) ->
+                UsbAudioController.getMixerGain(session, mixerUnitId, inCh, outCh)
+            }
+        val mixerGainRange =
+            mixerChannels.firstOrNull()?.let { (inCh, outCh) ->
+                UsbAudioController.getMixerGainRange(session, mixerUnitId, inCh, outCh)
+            }
+        _controlState.value =
+            UsbControlState(
+                deviceName = deviceName,
+                formats = session.topology.formats,
+                activeFormat = format,
+                sampleRateHz = SUPPORTED_SAMPLE_RATE_HZ,
+                muted = UsbAudioController.getMute(session),
+                volume = UsbAudioController.getVolume(session, 0),
+                volumeRange = UsbAudioController.getVolumeRange(session, 0),
+                mixerChannels = mixerChannels,
+                mixerGains = mixerGains,
+                mixerGainRange = mixerGainRange)
+    }
+
+    /** Live-adjusts the active session's mute state, if any; reflected in [controlState]. */
+    fun setMuted(muted: Boolean) {
+        val session = activeSession ?: return
+        val format = activeFormat ?: return
+        UsbAudioController.setMute(session, muted)
+        logEvent("User set mute=$muted")
+        refreshControlState(session, format, session.device.productName ?: session.device.deviceName)
+    }
+
+    /** Live-adjusts the active session's master/channel volume, if any; reflected in [controlState]. */
+    fun setVolume(valueDb: Int) {
+        val session = activeSession ?: return
+        val format = activeFormat ?: return
+        for (channel in 0..2) UsbAudioController.setVolume(session, valueDb, channel)
+        logEvent("User set volume=$valueDb")
+        refreshControlState(session, format, session.device.productName ?: session.device.deviceName)
+    }
+
+    /** Live-adjusts one Mixer Unit (input, output) channel pair's gain, if the device has one. */
+    fun setMixerGain(inputChannel: Int, outputChannel: Int, valueDb: Int) {
+        val session = activeSession ?: return
+        val format = activeFormat ?: return
+        val mixerUnitId = session.topology.mixerUnitId
+        if (mixerUnitId < 0) return
+        UsbAudioController.setMixerGain(session, mixerUnitId, inputChannel, outputChannel, valueDb)
+        logEvent("User set mixer gain in=$inputChannel out=$outputChannel to $valueDb")
+        refreshControlState(session, format, session.device.productName ?: session.device.deviceName)
+    }
+
+    /**
+     * Changes which bit resolution to prefer and immediately re-activates with it, if a format
+     * at that resolution exists on the current device (falls back to whatever's first otherwise
+     * -- see where [preferredBitResolution] is consulted in [activateDac]).
+     */
+    fun setPreferredBitResolution(bitResolution: Int) {
+        preferredBitResolution = bitResolution
+        logEvent("Preferred format set to ${bitResolution}-bit, re-activating")
+        debugRetryActivation()
     }
 
     private fun deactivateDac() {
         activeSession?.let { UsbAudioController.release(it) }
         activeSession = null
         activeFormat = null
+        _controlState.value = null
     }
 
     /**

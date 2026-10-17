@@ -20,14 +20,18 @@ package org.oxycblt.auxio.settings.categories
 
 import android.os.Bundle
 import android.view.View
+import androidx.preference.ListPreference
 import androidx.preference.Preference
 import androidx.preference.PreferenceCategory
+import androidx.preference.SeekBarPreference
+import androidx.preference.SwitchPreferenceCompat
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import org.oxycblt.auxio.R
 import org.oxycblt.auxio.settings.BasePreferenceFragment
 import org.oxycblt.auxio.usb.UsbAudioDevice
 import org.oxycblt.auxio.usb.UsbAudioManager
+import org.oxycblt.auxio.usb.UsbControlState
 import org.oxycblt.auxio.util.collectImmediately
 
 /**
@@ -44,6 +48,7 @@ class UsbPreferenceFragment : BasePreferenceFragment(R.xml.preferences_usb) {
         super.onViewCreated(view, savedInstanceState)
         collectImmediately(usbAudioManager.devices, ::updateDevice)
         collectImmediately(usbAudioManager.diagnosticLog, ::updateLog)
+        collectImmediately(usbAudioManager.controlState, ::updateControls)
     }
 
     private fun updateDevice(devices: List<UsbAudioDevice>) {
@@ -72,6 +77,96 @@ class UsbPreferenceFragment : BasePreferenceFragment(R.xml.preferences_usb) {
                     isSelectable = false
                     title = line
                 })
+        }
+    }
+
+    /**
+     * Rebuilds the "Controls" category entirely from what [state] says this device actually
+     * supports -- a device with a single format offers no format picker, one with no Mixer Unit
+     * in its topology offers no mixer-gain sliders, etc. Nothing here is specific to any one
+     * device model.
+     */
+    private fun updateControls(state: UsbControlState?) {
+        val category =
+            findPreference<PreferenceCategory>(getString(R.string.set_key_usb_controls_category))
+                ?: return
+        category.removeAll()
+
+        if (state == null) {
+            category.addPreference(
+                Preference(requireContext()).apply {
+                    isSelectable = false
+                    title = getString(R.string.set_usb_controls_none)
+                })
+            return
+        }
+
+        if (state.formats.size > 1) {
+            category.addPreference(
+                ListPreference(requireContext()).apply {
+                    key = getString(R.string.set_key_usb_format)
+                    title = getString(R.string.set_usb_format)
+                    isPersistent = false
+                    entries = state.formats.map { "${it.bitResolution}-bit" }.toTypedArray()
+                    entryValues = state.formats.map { it.bitResolution.toString() }.toTypedArray()
+                    value = state.activeFormat.bitResolution.toString()
+                    summary = "%s"
+                    setOnPreferenceChangeListener { _, newValue ->
+                        usbAudioManager.setPreferredBitResolution((newValue as String).toInt())
+                        true
+                    }
+                })
+        }
+
+        category.addPreference(
+            SwitchPreferenceCompat(requireContext()).apply {
+                key = getString(R.string.set_key_usb_mute)
+                title = getString(R.string.set_usb_mute)
+                isPersistent = false
+                isChecked = state.muted == true
+                setOnPreferenceChangeListener { _, newValue ->
+                    usbAudioManager.setMuted(newValue as Boolean)
+                    true
+                }
+            })
+
+        val volumeRange = state.volumeRange
+        if (volumeRange != null) {
+            category.addPreference(
+                SeekBarPreference(requireContext()).apply {
+                    key = getString(R.string.set_key_usb_volume)
+                    title = getString(R.string.set_usb_volume)
+                    isPersistent = false
+                    min = volumeRange.first
+                    max = volumeRange.second
+                    showSeekBarValue = true
+                    value = (state.volume ?: volumeRange.second).coerceIn(min, max)
+                    setOnPreferenceChangeListener { _, newValue ->
+                        usbAudioManager.setVolume(newValue as Int)
+                        true
+                    }
+                })
+        }
+
+        val mixerRange = state.mixerGainRange
+        if (mixerRange != null) {
+            for ((inCh, outCh) in state.mixerChannels) {
+                category.addPreference(
+                    SeekBarPreference(requireContext()).apply {
+                        key =
+                            getString(R.string.set_key_usb_mixer_gain_prefix) + "${inCh}_$outCh"
+                        title = getString(R.string.set_usb_mixer_gain, inCh, outCh)
+                        isPersistent = false
+                        min = mixerRange.first
+                        max = mixerRange.second
+                        showSeekBarValue = true
+                        value = (state.mixerGains[inCh to outCh] ?: mixerRange.second).coerceIn(min, max)
+                        setOnPreferenceChangeListener { _, newValue ->
+                            usbAudioManager.setMixerGain(inCh, outCh, newValue as Int)
+                            true
+                        }
+                    })
+            }
         }
     }
 

@@ -14,6 +14,10 @@
         app:title="@string/set_usb_retry" />
 
     <PreferenceCategory
+        app:key="@string/set_key_usb_controls_category"
+        app:title="@string/set_usb_controls_category" />
+
+    <PreferenceCategory
         app:key="@string/set_key_usb_log_category"
         app:title="@string/set_usb_log_category" />
 
