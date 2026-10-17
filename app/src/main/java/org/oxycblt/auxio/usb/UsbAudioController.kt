@@ -25,7 +25,7 @@ import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import timber.log.Timber as L
 
-/** An activated USB connection to a UAC3 device: configuration selected, interfaces claimed. */
+/** An activated USB connection to a UAC1/2/3 device: configuration selected, interfaces claimed. */
 data class UsbAudioSession(
     val device: UsbDevice,
     val connection: UsbDeviceConnection,
@@ -57,19 +57,31 @@ const val DAC_SETTLE_DELAY_MS = 300L
 object UsbAudioController {
     private const val REQ_TYPE_CLASS_INTERFACE_GET = 0xA1 // Device-to-host, Class, Interface
     private const val REQ_TYPE_CLASS_INTERFACE_SET = 0x21 // Host-to-device, Class, Interface
+    private const val REQ_TYPE_CLASS_ENDPOINT_GET = 0xA2 // Device-to-host, Class, Endpoint
+    private const val REQ_TYPE_CLASS_ENDPOINT_SET = 0x22 // Host-to-device, Class, Endpoint
+    // UAC 2.0/3.0 request codes: bRequest is a fixed CUR/RANGE selector, and GET vs SET is
+    // carried purely by bmRequestType's direction bit.
     private const val UAC_REQUEST_CUR = 0x01
     private const val UAC_REQUEST_RANGE = 0x02
+    // UAC 1.0 predates that unification: GET/SET is baked into bRequest itself (confirmed
+    // against the Linux kernel's UAC_SET_CUR/UAC_GET_CUR in include/linux/usb/audio.h), so a
+    // GET on a UAC 1.0 device needs bRequest=0x81, not the 0x01 that would mean SET_CUR.
+    private const val UAC1_REQUEST_GET_CUR = 0x81
     private const val CS_SAM_FREQ_CONTROL = 0x01
     private const val CS_CLOCK_VALID_CONTROL = 0x02
     private const val FU_MUTE_CONTROL = 0x01
     private const val FU_VOLUME_CONTROL = 0x02
     private const val AC_POWER_DOMAIN_CONTROL = 0x02
 
+    /** The CUR request's bRequest byte for [topology]'s UAC version and GET/SET direction. */
+    private fun curRequest(topology: UacPlaybackTopology, get: Boolean): Int =
+        if (topology.uacVersion == 1 && get) UAC1_REQUEST_GET_CUR else UAC_REQUEST_CUR
+
     const val PD_STATE_D0 = 0
     const val PD_STATE_D1 = 1
     const val PD_STATE_D2 = 2
 
-    /** Opens, configures, and claims the interfaces for [device]'s UAC3 playback topology. */
+    /** Opens, configures, and claims the interfaces for [device]'s playback topology. */
     fun activate(context: Context, device: UsbDevice, topology: UacPlaybackTopology): UsbAudioSession? {
         val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
         val connection = usbManager.openDevice(device)
@@ -141,7 +153,7 @@ object UsbAudioController {
         }
 
         L.i(
-            "Activated UAC3 session: config=${targetConfig.id} " +
+            "Activated UAC${topology.uacVersion} session: config=${targetConfig.id} " +
                 "control=${control.id} streaming=${topology.streamingInterfaceNumber} " +
                 "alts=${streamingAlts.keys}")
         return UsbAudioSession(device, connection, topology, control, streamingAlts)
@@ -247,6 +259,65 @@ object UsbAudioController {
         return ok
     }
 
+    /**
+     * Reads a UAC 1.0 streaming endpoint's current Sampling Frequency Control, in Hz, or null on
+     * failure. UAC 1.0 has no Clock Source entity ([UacPlaybackTopology.clockSourceId] is always
+     * -1); the rate is instead a 3-byte (not UAC 2.0/3.0's 4-byte) property of the endpoint
+     * itself, addressed by endpoint address rather than by entity id + control interface.
+     */
+    fun getUac1EndpointSampleRate(session: UsbAudioSession, endpointAddress: Int): Int? {
+        val buffer = ByteArray(3)
+        val wValue = CS_SAM_FREQ_CONTROL shl 8
+        val result =
+            session.connection.controlTransfer(
+                REQ_TYPE_CLASS_ENDPOINT_GET,
+                UAC1_REQUEST_GET_CUR,
+                wValue,
+                endpointAddress,
+                buffer,
+                buffer.size,
+                1000)
+        if (result != 3) {
+            L.w("GET_CUR UAC1 endpoint sample rate (ep=0x${"%02x".format(endpointAddress)}) failed: result=$result")
+            return null
+        }
+        val hz = (buffer[0].toInt() and 0xFF) or ((buffer[1].toInt() and 0xFF) shl 8) or ((buffer[2].toInt() and 0xFF) shl 16)
+        L.i("UAC1 endpoint 0x${"%02x".format(endpointAddress)} current sample rate: $hz Hz")
+        return hz
+    }
+
+    /**
+     * Sets a UAC 1.0 streaming endpoint's Sampling Frequency Control, then reads it back to
+     * confirm. Must be called only after [selectFormat] has switched the streaming interface to
+     * the alternate setting owning this endpoint -- unlike UAC 2.0/3.0's entity-addressed Clock
+     * Source, this endpoint doesn't functionally exist (and this request isn't meaningful) until
+     * that alternate setting is actually active.
+     */
+    fun setUac1EndpointSampleRate(session: UsbAudioSession, endpointAddress: Int, hz: Int): Boolean {
+        val wValue = CS_SAM_FREQ_CONTROL shl 8
+        val buffer =
+            byteArrayOf((hz and 0xFF).toByte(), ((hz shr 8) and 0xFF).toByte(), ((hz shr 16) and 0xFF).toByte())
+        val result =
+            session.connection.controlTransfer(
+                REQ_TYPE_CLASS_ENDPOINT_SET,
+                UAC_REQUEST_CUR, // SET_CUR is 0x01 in UAC1 too -- only GET_CUR differs (0x81)
+                wValue,
+                endpointAddress,
+                buffer,
+                buffer.size,
+                1000)
+        if (result < 0) {
+            L.w("SET_CUR UAC1 endpoint sample rate to $hz Hz failed: result=$result")
+            return false
+        }
+        val readBack = getUac1EndpointSampleRate(session, endpointAddress)
+        val ok = readBack == hz
+        L.i(
+            "SET_CUR UAC1 endpoint 0x${"%02x".format(endpointAddress)} sample rate to $hz Hz: " +
+                "write result=$result, readback=$readBack, match=$ok")
+        return ok
+    }
+
     /** Reads the Feature Unit's mute state for [channel] (0=master, 1=left, 2=right), or null. */
     fun getMute(session: UsbAudioSession, channel: Int = 0): Boolean? {
         val unitId = session.topology.outputFeatureUnitId
@@ -256,7 +327,13 @@ object UsbAudioController {
         val wIndex = (unitId shl 8) or session.controlInterface.id
         val result =
             session.connection.controlTransfer(
-                REQ_TYPE_CLASS_INTERFACE_GET, UAC_REQUEST_CUR, wValue, wIndex, buffer, buffer.size, 1000)
+                REQ_TYPE_CLASS_INTERFACE_GET,
+                curRequest(session.topology, get = true),
+                wValue,
+                wIndex,
+                buffer,
+                buffer.size,
+                1000)
         if (result != 1) {
             L.w("GET_CUR mute (unit=$unitId ch=$channel) failed: result=$result")
             return null
@@ -287,7 +364,13 @@ object UsbAudioController {
         val wIndex = (unitId shl 8) or session.controlInterface.id
         val result =
             session.connection.controlTransfer(
-                REQ_TYPE_CLASS_INTERFACE_GET, UAC_REQUEST_CUR, wValue, wIndex, buffer, buffer.size, 1000)
+                REQ_TYPE_CLASS_INTERFACE_GET,
+                curRequest(session.topology, get = true),
+                wValue,
+                wIndex,
+                buffer,
+                buffer.size,
+                1000)
         if (result != 2) {
             L.w("GET_CUR volume (unit=$unitId ch=$channel) failed: result=$result")
             return null
@@ -352,7 +435,13 @@ object UsbAudioController {
         val wIndex = (mixerUnitId shl 8) or session.controlInterface.id
         val result =
             session.connection.controlTransfer(
-                REQ_TYPE_CLASS_INTERFACE_GET, UAC_REQUEST_CUR, wValue, wIndex, buffer, buffer.size, 1000)
+                REQ_TYPE_CLASS_INTERFACE_GET,
+                curRequest(session.topology, get = true),
+                wValue,
+                wIndex,
+                buffer,
+                buffer.size,
+                1000)
         if (result != 2) {
             L.w(
                 "GET_CUR mixer gain (unit=$mixerUnitId in=$inputChannel out=$outputChannel) " +

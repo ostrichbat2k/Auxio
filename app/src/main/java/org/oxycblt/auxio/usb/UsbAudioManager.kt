@@ -53,7 +53,10 @@ import timber.log.Timber as L
  * USB's 1ms isochronous packet, is handled without a fixed packet size).
  */
 @Singleton
-class UsbAudioManager @Inject constructor(@ApplicationContext private val context: Context) {
+class UsbAudioManager
+@Inject
+constructor(@ApplicationContext private val context: Context, private val usbSettings: UsbSettings) :
+    UsbSettings.Listener {
     private val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
 
     private val _devices = MutableStateFlow<List<UsbAudioDevice>>(emptyList())
@@ -76,6 +79,10 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
     /** Live, read-back-from-the-device state of the active session's adjustable controls. */
     val controlState: StateFlow<UsbControlState?> = _controlState.asStateFlow()
 
+    private val _capabilities = MutableStateFlow<UsbDeviceCapabilities?>(null)
+    /** Everything found on the attached device's descriptors -- see [UsbDeviceCapabilities]. */
+    val capabilities: StateFlow<UsbDeviceCapabilities?> = _capabilities.asStateFlow()
+
     // In-memory only: which bit resolution to prefer when multiple formats are offered. Not
     // persisted across process death since changing it re-activates immediately anyway; a
     // settings-screen choice only has user-visible meaning while that screen (or the session it
@@ -84,6 +91,10 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
 
     @Volatile private var activeSession: UsbAudioSession? = null
     @Volatile private var activeFormat: UacStreamFormat? = null
+    // UAC 2.0/3.0 always stream at SUPPORTED_SAMPLE_RATE_HZ (the clock source is set to it
+    // directly); UAC 1.0 negotiates per-format instead (see activateDac), so the actual active
+    // rate has to be tracked rather than assumed.
+    @Volatile private var activeRateHz: Int = SUPPORTED_SAMPLE_RATE_HZ
 
     private var started = false
     private var knownDeviceNames = emptySet<String>()
@@ -100,6 +111,7 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
                     UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                         L.i("USB device detached: ${intentDevice(intent)?.deviceName}")
                         deactivateDac()
+                        _capabilities.value = null
                         refresh()
                     }
                     ACTION_USB_PERMISSION -> {
@@ -134,6 +146,7 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
     fun start() {
         if (started) return
         started = true
+        usbSettings.registerListener(this)
 
         val filter =
             IntentFilter().apply {
@@ -180,7 +193,7 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
         // permission was in fact granted a moment later.
         for (audioDevice in found) {
             val wasPermitted = knownPermissions[audioDevice.device.deviceName] ?: false
-            if (audioDevice.hasPermission && !wasPermitted) {
+            if (usbSettings.enabled && audioDevice.hasPermission && !wasPermitted) {
                 L.i("Permission newly granted for ${audioDevice.displayName}, activating DAC session")
                 // Session activation blocks on several control transfers; keep it off whatever
                 // thread refresh() was called on (the broadcast receiver's, normally main).
@@ -237,6 +250,9 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
                 if (topology == null) {
                     UsbAudioDescriptorParser.parseUac2Playback(bytes)?.let { topology = it }
                 }
+                if (topology == null) {
+                    UsbAudioDescriptorParser.parseUac1Playback(bytes)?.let { topology = it }
+                }
             }
         } finally {
             connection.close()
@@ -244,9 +260,16 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
 
         val found = topology
         if (found == null) {
-            logEvent("No UAC3 playback topology found on ${device.deviceName}")
+            logEvent("No UAC1/UAC2/UAC3 playback topology found on ${device.deviceName}")
             return
         }
+        val deviceName = device.productName ?: device.deviceName
+        _capabilities.value =
+            UsbDeviceCapabilities(
+                deviceName = deviceName,
+                vendorId = device.vendorId,
+                productId = device.productId,
+                topology = found)
         val format =
             found.formats.firstOrNull { it.bitResolution == preferredBitResolution }
                 ?: found.formats.firstOrNull()
@@ -260,7 +283,7 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
 
         val session = UsbAudioController.activate(context, device, found)
         if (session == null) {
-            logEvent("Failed to activate UAC3 session for ${device.deviceName}")
+            logEvent("Failed to activate UAC${found.uacVersion} session for ${device.deviceName}")
             return
         }
 
@@ -278,8 +301,18 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
             logEvent("No power domain found covering our USB input")
         }
 
-        val clockOk = UsbAudioController.setClockFrequency(session, SUPPORTED_SAMPLE_RATE_HZ)
-        logEvent("Clock set to $SUPPORTED_SAMPLE_RATE_HZ Hz: ok=$clockOk")
+        // UAC 2.0/3.0: the Clock Source entity is addressed independently of which streaming
+        // alternate setting ends up selected, so this can happen up front. UAC 1.0 has no Clock
+        // Source at all -- its sample rate is a property of the streaming *endpoint* itself, set
+        // further below, after selectFormat has made that endpoint active (see there for why).
+        val clockOk =
+            if (found.uacVersion != 1) {
+                UsbAudioController.setClockFrequency(session, SUPPORTED_SAMPLE_RATE_HZ).also {
+                    logEvent("Clock set to $SUPPORTED_SAMPLE_RATE_HZ Hz: ok=$it")
+                }
+            } else {
+                true
+            }
         val muted = UsbAudioController.getMute(session)
         if (muted != false) UsbAudioController.setMute(session, muted = false)
         // Master channel (0) volume: we check master *mute* above, but had never checked
@@ -337,8 +370,36 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
         val formatOk = UsbAudioController.selectFormat(session, format)
         logEvent("Alt-setting ${format.alternateSetting} (${format.bitResolution}-bit) selected: ok=$formatOk")
 
-        if (!clockOk || !formatOk) {
-            logEvent("Failed to configure DAC session (clock=$clockOk format=$formatOk)")
+        // UAC 1.0's Sampling Frequency Control lives on the streaming endpoint itself, which
+        // doesn't functionally exist until selectFormat (just above) has made its alternate
+        // setting active -- so this has to happen after, unlike UAC 2.0/3.0's entity-addressed
+        // clock above. Pick whichever of this format's declared rates matches what the rest of
+        // the app expects (48kHz, falling back to 44.1kHz), or just its first if neither is
+        // offered.
+        val rateHz =
+            if (found.uacVersion == 1) {
+                format.sampleRates.firstOrNull { it == SUPPORTED_SAMPLE_RATE_HZ }
+                    ?: format.sampleRates.firstOrNull { it == 44100 }
+                    ?: format.sampleRates.firstOrNull()
+            } else {
+                SUPPORTED_SAMPLE_RATE_HZ
+            }
+        val rateOk =
+            if (found.uacVersion == 1) {
+                if (rateHz == null) {
+                    logEvent("Format alt=${format.alternateSetting} declares no sample rate")
+                    false
+                } else {
+                    UsbAudioController.setUac1EndpointSampleRate(session, format.endpointAddress, rateHz).also {
+                        logEvent("UAC1 endpoint sample rate set to $rateHz Hz: ok=$it")
+                    }
+                }
+            } else {
+                clockOk
+            }
+
+        if (!rateOk || !formatOk) {
+            logEvent("Failed to configure DAC session (rate=$rateOk format=$formatOk)")
             UsbAudioController.release(session)
             return
         }
@@ -356,12 +417,16 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
         // settings screen's "Retry activation" + its live controls now cover manual diagnosis
         // instead.
         Thread.sleep(DAC_SETTLE_DELAY_MS)
-        logEvent("Clock valid: ${UsbAudioController.getClockValid(session)}")
+        // No Clock Source entity exists to query on UAC 1.0.
+        if (found.uacVersion != 1) {
+            logEvent("Clock valid: ${UsbAudioController.getClockValid(session)}")
+        }
 
         activeSession = session
         activeFormat = format
+        activeRateHz = rateHz ?: SUPPORTED_SAMPLE_RATE_HZ
         refreshControlState(session, format, device.productName ?: device.deviceName)
-        logEvent("DAC session ready: $format at $SUPPORTED_SAMPLE_RATE_HZ Hz")
+        logEvent("DAC session ready: $format at ${activeRateHz} Hz")
     }
 
     /** Re-reads every adjustable control from the device and republishes [controlState]. */
@@ -387,7 +452,7 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
                 deviceName = deviceName,
                 formats = session.topology.formats,
                 activeFormat = format,
-                sampleRateHz = SUPPORTED_SAMPLE_RATE_HZ,
+                sampleRateHz = activeRateHz,
                 muted = UsbAudioController.getMute(session),
                 volume = UsbAudioController.getVolume(session, 0),
                 volumeRange = UsbAudioController.getVolumeRange(session, 0),
@@ -453,6 +518,10 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
      * device or restarting the app.
      */
     fun debugRetryActivation() {
+        if (!usbSettings.enabled) {
+            L.i("debugRetryActivation: USB DAC output is disabled in settings")
+            return
+        }
         val device = _devices.value.firstOrNull()
         if (device == null) {
             L.w("debugRetryActivation: no USB audio device attached")
@@ -470,6 +539,22 @@ class UsbAudioManager @Inject constructor(@ApplicationContext private val contex
                 isDaemon = true
                 start()
             }
+    }
+
+    /**
+     * [UsbSettings.Listener] callback: direct USB output is an opt-in, experimental feature (it
+     * claims the USB interface away from Android's own audio framework), off by default. Turning
+     * it on tries to activate whatever's already attached; turning it off releases any active
+     * session immediately.
+     */
+    override fun onUsbEnabledChanged() {
+        if (usbSettings.enabled) {
+            L.i("USB DAC output enabled by user, attempting activation")
+            debugRetryActivation()
+        } else {
+            L.i("USB DAC output disabled by user, releasing any active session")
+            deactivateDac()
+        }
     }
 
     private companion object {

@@ -95,16 +95,24 @@ class UsbAudioSink(private val session: UsbAudioSession, private val format: Uac
         this.listener = listener
     }
 
+    // UAC 1.0 declares its actual supported rate(s) per-format (e.g. the real device this was
+    // confirmed against offers only 8000/48000 Hz, not 44100 at all); UAC 2.0/3.0 negotiate
+    // through a shared Clock Source instead, where the hardcoded 44100/48000 pair is what this
+    // codebase has actually verified devices accept. Falling back to the hardcoded set when
+    // sampleRates is empty (UAC 2.0/3.0) keeps that behavior unchanged.
+    private val acceptedSampleRates =
+        this.format.sampleRates.toSet().ifEmpty { SUPPORTED_SAMPLE_RATES }
+
     override fun supportsFormat(format: Format): Boolean {
         val supported =
             format.pcmEncoding == C.ENCODING_PCM_16BIT &&
                 format.channelCount == CHANNELS &&
-                format.sampleRate in SUPPORTED_SAMPLE_RATES
+                format.sampleRate in acceptedSampleRates
         if (!supported) {
             L.i(
                 "UsbAudioSink: format not supported (encoding=${format.pcmEncoding} " +
                     "channels=${format.channelCount} rate=${format.sampleRate}, need " +
-                    "16-bit/$CHANNELS ch/one of $SUPPORTED_SAMPLE_RATES Hz)")
+                    "16-bit/$CHANNELS ch/one of $acceptedSampleRates Hz)")
         }
         return supported
     }
@@ -150,7 +158,19 @@ class UsbAudioSink(private val session: UsbAudioSession, private val format: Uac
         framesWritten = 0L
         ended = false
 
-        val clockOk = UsbAudioController.setClockFrequency(session, sampleRateHz)
+        // UAC 1.0 has no Clock Source entity -- its rate lives on the streaming endpoint itself
+        // (see UsbAudioManager.activateDac's comment on the same split). Using
+        // setClockFrequency unconditionally here was the actual cause of a real, reproduced
+        // infinite playback-error loop against a UAC 1.0 device: every configure() call failed
+        // this control transfer (wrong addressing entirely -- clockSourceId is always -1), threw
+        // this same ConfigurationException every time, and fed straight into
+        // ExoPlaybackStateHolder.onPlayerError's unconditional retry-next-track recovery.
+        val clockOk =
+            if (session.topology.uacVersion == 1) {
+                UsbAudioController.setUac1EndpointSampleRate(session, format.endpointAddress, sampleRateHz)
+            } else {
+                UsbAudioController.setClockFrequency(session, sampleRateHz)
+            }
         if (!clockOk) {
             throw AudioSink.ConfigurationException(
                 "Failed to set DAC clock to $sampleRateHz Hz", inputFormat)

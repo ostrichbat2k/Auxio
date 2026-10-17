@@ -300,10 +300,14 @@
 
     <string name="set_usb">USB Audio</string>
     <string name="set_usb_desc">Direct USB DAC status and activation log</string>
+    <string name="set_usb_enabled">Enable direct USB DAC output</string>
+    <string name="set_usb_enabled_desc">Experimental. When on, Auxio takes over a connected USB DAC directly instead of using Android\'s normal audio output. Off by default -- try it, but expect rough edges.</string>
     <string name="set_usb_device">Device</string>
     <string name="set_usb_device_none">No USB audio device attached</string>
     <string name="set_usb_retry">Retry activation</string>
     <string name="set_usb_retry_desc">Re-run DAC setup for the attached device</string>
+    <string name="set_usb_capabilities_category">Capabilities</string>
+    <string name="set_usb_capabilities_none">Nothing discovered yet -- activates once a USB DAC is attached and permitted</string>
     <string name="set_usb_controls_category">Controls</string>
     <string name="set_usb_controls_none">No active USB DAC session -- controls will appear here once one activates</string>
     <string name="set_usb_format">Format</string>

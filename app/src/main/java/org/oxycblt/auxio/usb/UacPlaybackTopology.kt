@@ -18,7 +18,7 @@
 
 package org.oxycblt.auxio.usb
 
-/** One selectable PCM format on a UAC 3.0 streaming interface: one alternate setting. */
+/** One selectable PCM format on a UAC streaming interface: one alternate setting. */
 data class UacStreamFormat(
     val alternateSetting: Int,
     val bitResolution: Int,
@@ -27,13 +27,22 @@ data class UacStreamFormat(
     val endpointAddress: Int,
     val maxPacketSize: Int,
     val isAsync: Boolean,
+    /**
+     * UAC 1.0 only: the sample rate(s) this format's FORMAT_TYPE descriptor declares directly
+     * (empty for UAC 2.0/3.0, which negotiate rate through [UacPlaybackTopology.clockSourceId]
+     * instead -- UAC 1.0 has no Clock Source entity at all).
+     */
+    val sampleRates: List<Int> = emptyList(),
 )
 
-/** The USB Audio Class 3.0 playback topology discovered on a device: enough to start a stream. */
+/** The USB Audio Class playback topology discovered on a device: enough to start a stream. */
 data class UacPlaybackTopology(
     val configurationValue: Int,
     val controlInterfaceNumber: Int,
     val streamingInterfaceNumber: Int,
+    /** 1, 2 or 3, whichever parser matched this device's AudioControl interface. */
+    val uacVersion: Int,
+    /** -1 for UAC 1.0, which has no Clock Source entity -- see [UacStreamFormat.sampleRates]. */
     val clockSourceId: Int,
     /** The Feature Unit gating the physical output (mute/volume), or -1 if none was found. */
     val outputFeatureUnitId: Int,
@@ -68,4 +77,17 @@ data class UacPlaybackTopology(
     /** D2->D0 recovery time in microseconds (waRecoveryTime2 * 50us), or 0 if unknown. */
     val powerDomainD2RecoveryUs: Int,
     val formats: List<UacStreamFormat>,
+)
+
+/**
+ * Everything [UsbAudioDescriptorParser] found on a device's descriptors, bundled for read-only
+ * display on the USB settings screen -- published as soon as a topology is parsed, independent of
+ * whether the control-transfer setup that follows (clock, mute, volume, mixer gain) ends up
+ * succeeding, since it describes what the device *declares*, not what Auxio managed to configure.
+ */
+data class UsbDeviceCapabilities(
+    val deviceName: String,
+    val vendorId: Int,
+    val productId: Int,
+    val topology: UacPlaybackTopology,
 )

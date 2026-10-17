@@ -3,6 +3,12 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     app:title="@string/set_usb">
 
+    <SwitchPreferenceCompat
+        app:defaultValue="false"
+        app:key="@string/set_key_usb_enabled"
+        app:summary="@string/set_usb_enabled_desc"
+        app:title="@string/set_usb_enabled" />
+
     <Preference
         app:key="@string/set_key_usb_device"
         app:selectable="false"
@@ -12,6 +18,10 @@
         app:key="@string/set_key_usb_retry"
         app:summary="@string/set_usb_retry_desc"
         app:title="@string/set_usb_retry" />
+
+    <PreferenceCategory
+        app:key="@string/set_key_usb_capabilities_category"
+        app:title="@string/set_usb_capabilities_category" />
 
     <PreferenceCategory
         app:key="@string/set_key_usb_controls_category"

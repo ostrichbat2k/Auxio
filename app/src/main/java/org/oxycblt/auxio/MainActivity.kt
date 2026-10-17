@@ -36,6 +36,7 @@ import org.oxycblt.auxio.playback.PlaybackViewModel
 import org.oxycblt.auxio.playback.state.DeferredPlayback
 import org.oxycblt.auxio.ui.UISettings
 import org.oxycblt.auxio.usb.UsbAudioManager
+import org.oxycblt.auxio.usb.UsbSettings
 import org.oxycblt.auxio.util.isNight
 import org.oxycblt.auxio.util.systemBarInsetsCompat
 import timber.log.Timber as L
@@ -59,6 +60,7 @@ class MainActivity : AppCompatActivity() {
     private val playbackModel: PlaybackViewModel by viewModels()
     @Inject lateinit var uiSettings: UISettings
     @Inject lateinit var usbAudioManager: UsbAudioManager
+    @Inject lateinit var usbSettings: UsbSettings
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -105,9 +107,13 @@ class MainActivity : AppCompatActivity() {
 
         // Permission prompts need a foregrounded Activity, so ask here rather than in
         // UsbAudioManager itself for any device we've detected but don't yet have access to.
-        usbAudioManager.devices.value
-            .filterNot { it.hasPermission }
-            .forEach { usbAudioManager.requestPermission(it.device) }
+        // Direct USB output is opt-in (off by default), so don't prompt unless the user has
+        // actually turned it on in settings.
+        if (usbSettings.enabled) {
+            usbAudioManager.devices.value
+                .filterNot { it.hasPermission }
+                .forEach { usbAudioManager.requestPermission(it.device) }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {

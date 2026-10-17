@@ -53,8 +53,17 @@ import java.nio.ByteBuffer
  * long as the current delegate is still the fallback, so losing the race on track 1 just means
  * falling back to the speaker for that one track -- the next [configure] call (next track, or a
  * seek/format change on the same one) gets another chance, instead of being stuck on the
- * fallback for the rest of the player's lifetime. Once actually upgraded to the USB sink, it's
- * never downgraded back -- only [reset] clears that (e.g. the device was unplugged).
+ * fallback for the rest of the player's lifetime.
+ *
+ * Once actually upgraded to a USB sink, [resolveForConfigure] still re-validates it's the same
+ * instance [usbAudioManager] currently considers live on every call -- unplugging the DAC
+ * mid-stream (or swapping it for a different one) makes [UsbAudioManager.createAudioSink] start
+ * returning null or a new instance, and without this check every subsequent [configure] kept
+ * reusing the old, now-dead session's sink forever: every call failed identically (a closed
+ * [android.hardware.usb.UsbDeviceConnection] can't issue control transfers), which fed into
+ * [org.oxycblt.auxio.playback.service.ExoPlaybackStateHolder.onPlayerError]'s unconditional
+ * retry-next-track loop with no backoff -- a real, reproduced infinite error loop, not a
+ * hypothetical. [reset] still clears the delegate outright for other cases (e.g. a hard seek).
  */
 class RoutingAudioSink(private val usbAudioManager: UsbAudioManager, private val fallback: AudioSink) :
     AudioSink {
@@ -68,11 +77,21 @@ class RoutingAudioSink(private val usbAudioManager: UsbAudioManager, private val
 
     private fun resolveForConfigure(): AudioSink {
         val existing = delegate
-        if (existing != null && existing !== fallback) {
-            // Already upgraded to USB; never go back down.
+        val liveUsbSink = usbAudioManager.createAudioSink()
+        if (existing != null && existing !== fallback && existing === liveUsbSink) {
+            // Already upgraded to USB, and that session is still the one UsbAudioManager
+            // considers live -- never go back down to fallback on our own initiative.
             return existing
         }
-        val chosen = usbAudioManager.createAudioSink() ?: fallback
+        // Either never upgraded, or `existing` is a USB sink whose session has since died
+        // (device unplugged mid-stream: UsbAudioManager.deactivateDac() cleared activeSink,
+        // so createAudioSink() now returns null or a *different* instance for a newly
+        // activated device). Continuing to use a dead session's sink was observed spinning
+        // configure() into a permanent error loop -- every call failing identically with no
+        // way out, since nothing else here ever re-checks liveness once "upgraded". Falling
+        // through here re-resolves against what's actually live right now, same as a fresh
+        // player would.
+        val chosen = liveUsbSink ?: fallback
         if (chosen !== existing) {
             pendingListener?.let(chosen::setListener)
         }
