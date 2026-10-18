@@ -62,8 +62,8 @@ import org.oxycblt.auxio.playback.state.RawQueue
 import org.oxycblt.auxio.playback.state.RepeatMode
 import org.oxycblt.auxio.playback.state.ShuffleMode
 import org.oxycblt.auxio.playback.state.StateAck
-import org.oxycblt.auxio.usb.RoutingAudioSink
-import org.oxycblt.auxio.usb.UsbAudioManager
+import org.ostrichbat2k.usbdac.RoutingAudioSink
+import org.ostrichbat2k.usbdac.UsbAudioManager
 import org.oxycblt.musikr.MusicParent
 import org.oxycblt.musikr.Song
 import timber.log.Timber as L

@@ -26,11 +26,11 @@ import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import org.oxycblt.auxio.R
 import org.oxycblt.auxio.settings.BasePreferenceFragment
-import org.oxycblt.auxio.usb.UacStreamFormat
-import org.oxycblt.auxio.usb.UsbAudioController
-import org.oxycblt.auxio.usb.UsbAudioManager
-import org.oxycblt.auxio.usb.UsbControlState
-import org.oxycblt.auxio.usb.UsbDeviceCapabilities
+import org.ostrichbat2k.usbdac.UacStreamFormat
+import org.ostrichbat2k.usbdac.UsbAudioController
+import org.ostrichbat2k.usbdac.UsbAudioManager
+import org.ostrichbat2k.usbdac.UsbControlState
+import org.ostrichbat2k.usbdac.UsbDeviceCapabilities
 import org.oxycblt.auxio.util.collectImmediately
 
 /**

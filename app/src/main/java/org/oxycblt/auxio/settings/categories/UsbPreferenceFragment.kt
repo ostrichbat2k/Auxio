@@ -30,11 +30,11 @@ import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import org.oxycblt.auxio.R
 import org.oxycblt.auxio.settings.BasePreferenceFragment
-import org.oxycblt.auxio.usb.UsbAudioDevice
-import org.oxycblt.auxio.usb.UsbAudioManager
-import org.oxycblt.auxio.usb.UsbControlState
-import org.oxycblt.auxio.usb.UsbDeviceCapabilities
-import org.oxycblt.auxio.usb.UsbSettings
+import org.ostrichbat2k.usbdac.UsbAudioDevice
+import org.ostrichbat2k.usbdac.UsbAudioManager
+import org.ostrichbat2k.usbdac.UsbControlState
+import org.ostrichbat2k.usbdac.UsbDeviceCapabilities
+import org.ostrichbat2k.usbdac.UsbDacPreferences
 import org.oxycblt.auxio.util.collectImmediately
 import org.oxycblt.auxio.util.navigateSafe
 
@@ -47,7 +47,7 @@ import org.oxycblt.auxio.util.navigateSafe
 @AndroidEntryPoint
 class UsbPreferenceFragment : BasePreferenceFragment(R.xml.preferences_usb) {
     @Inject lateinit var usbAudioManager: UsbAudioManager
-    @Inject lateinit var usbSettings: UsbSettings
+    @Inject lateinit var usbSettings: UsbDacPreferences
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)

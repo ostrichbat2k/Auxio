@@ -29,7 +29,7 @@ import org.oxycblt.auxio.home.HomeSettings
 import org.oxycblt.auxio.image.ImageSettings
 import org.oxycblt.auxio.playback.PlaybackSettings
 import org.oxycblt.auxio.ui.UISettings
-import org.oxycblt.auxio.usb.UsbAudioManager
+import org.ostrichbat2k.usbdac.UsbAudioManager
 import org.oxycblt.auxio.util.CopyleftNoticeTree
 import timber.log.Timber
 

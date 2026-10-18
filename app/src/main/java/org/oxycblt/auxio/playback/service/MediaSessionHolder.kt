@@ -56,8 +56,8 @@ import org.oxycblt.auxio.playback.state.PlaybackStateManager
 import org.oxycblt.auxio.playback.state.Progression
 import org.oxycblt.auxio.playback.state.QueueChange
 import org.oxycblt.auxio.playback.state.RepeatMode
-import org.oxycblt.auxio.usb.UsbAudioManager
-import org.oxycblt.auxio.usb.UsbSettings
+import org.ostrichbat2k.usbdac.UsbAudioManager
+import org.ostrichbat2k.usbdac.UsbDacPreferences
 import org.oxycblt.auxio.util.newBroadcastPendingIntent
 import org.oxycblt.auxio.util.newMainPendingIntent
 import org.oxycblt.musikr.MusicParent
@@ -79,8 +79,8 @@ private constructor(
     private val imageSettings: ImageSettings,
     private val mediaSessionInterface: MediaSessionInterface,
     private val usbAudioManager: UsbAudioManager,
-    private val usbSettings: UsbSettings,
-) : PlaybackStateManager.Listener, ImageSettings.Listener, UsbSettings.Listener {
+    private val usbSettings: UsbDacPreferences,
+) : PlaybackStateManager.Listener, ImageSettings.Listener, UsbDacPreferences.Listener {
 
     class Factory
     @Inject
@@ -90,7 +90,7 @@ private constructor(
         private val imageSettings: ImageSettings,
         private val mediaSessionInterface: MediaSessionInterface,
         private val usbAudioManager: UsbAudioManager,
-        private val usbSettings: UsbSettings,
+        private val usbSettings: UsbDacPreferences,
     ) {
         fun create(context: Context, foregroundListener: ForegroundListener) =
             MediaSessionHolder(
@@ -169,7 +169,7 @@ private constructor(
      * [usbAudioManager]) instead of Android's normal [AudioManager.STREAM_MUSIC] handling,
      * whenever the DAC is actually what's receiving audio right now.
      *
-     * Direct USB output ([UsbAudioOutput][org.oxycblt.auxio.usb.UsbAudioOutput]) bypasses
+     * Direct USB output ([UsbAudioOutput][org.ostrichbat2k.usbdac.UsbAudioOutput]) bypasses
      * AudioTrack/AudioFlinger entirely, so [AudioManager.STREAM_MUSIC] -- what physical volume
      * keys adjust by default -- has no connection whatsoever to what's actually reaching the
      * DAC: the keys would move a slider that does nothing audible. [MediaSessionCompat
@@ -177,9 +177,9 @@ private constructor(
      * Cast/Bluetooth-AVRCP-absolute-volume session uses) -- it hands volume key events to
      * [usbVolumeProvider] instead, which forwards them to the Feature Unit via
      * [usbAudioManager]. [usbAudioManager.createAudioSink] is null unless
-     * [UsbSettings.bitPerfectMode] is on *and* the device's volume range was actually read back
+     * [UsbDacPreferences.bitPerfectMode] is on *and* the device's volume range was actually read back
      * successfully ([UsbAudioManager.isBitPerfectCapable]) -- the same condition
-     * [org.oxycblt.auxio.usb.RoutingAudioSink] uses to decide whether a track actually gets
+     * [org.ostrichbat2k.usbdac.RoutingAudioSink] uses to decide whether a track actually gets
      * routed to the DAC -- but that decision is itself per-track, not per-session (a format the
      * device can't take falls back to Android's normal HAL path even while bit-perfect mode
      * stays on), so [usbAudioManager.playbackRoute] -- RoutingAudioSink's own per-track report --

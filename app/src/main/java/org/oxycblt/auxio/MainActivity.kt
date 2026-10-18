@@ -35,8 +35,8 @@ import org.oxycblt.auxio.databinding.ActivityMainBinding
 import org.oxycblt.auxio.playback.PlaybackViewModel
 import org.oxycblt.auxio.playback.state.DeferredPlayback
 import org.oxycblt.auxio.ui.UISettings
-import org.oxycblt.auxio.usb.UsbAudioManager
-import org.oxycblt.auxio.usb.UsbSettings
+import org.ostrichbat2k.usbdac.UsbAudioManager
+import org.ostrichbat2k.usbdac.UsbDacPreferences
 import org.oxycblt.auxio.util.isNight
 import org.oxycblt.auxio.util.systemBarInsetsCompat
 import timber.log.Timber as L
@@ -60,7 +60,7 @@ class MainActivity : AppCompatActivity() {
     private val playbackModel: PlaybackViewModel by viewModels()
     @Inject lateinit var uiSettings: UISettings
     @Inject lateinit var usbAudioManager: UsbAudioManager
-    @Inject lateinit var usbSettings: UsbSettings
+    @Inject lateinit var usbSettings: UsbDacPreferences
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

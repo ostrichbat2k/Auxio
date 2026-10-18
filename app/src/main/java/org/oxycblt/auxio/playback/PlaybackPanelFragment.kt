@@ -52,8 +52,8 @@ import org.oxycblt.auxio.playback.ui.swiper.CarouselTransformer
 import org.oxycblt.auxio.playback.ui.swiper.CoverPagerAdapter
 import org.oxycblt.auxio.playback.ui.swiper.UserAwarePagerCallback
 import org.oxycblt.auxio.ui.ViewBindingFragment
-import org.oxycblt.auxio.usb.UsbAudioManager
-import org.oxycblt.auxio.usb.UsbControlState
+import org.ostrichbat2k.usbdac.UsbAudioManager
+import org.ostrichbat2k.usbdac.UsbControlState
 import org.oxycblt.auxio.util.collectImmediately
 import org.oxycblt.auxio.util.dampen
 import org.oxycblt.auxio.util.recycler
@@ -285,7 +285,7 @@ class PlaybackPanelFragment :
     }
 
     /**
-     * Shows exactly what [org.oxycblt.auxio.usb.RoutingAudioSink] is doing with the current
+     * Shows exactly what [org.ostrichbat2k.usbdac.RoutingAudioSink] is doing with the current
      * track, including its real decoded format either way -- hidden entirely when there's no DAC
      * session at all ([controlState] null -- feature off, nothing plugged in) so this stays
      * invisible to anyone not using the feature. Shown for [UsbAudioManager.PlaybackRoute
