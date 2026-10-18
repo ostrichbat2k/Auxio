@@ -210,7 +210,7 @@ class UsbPreferenceFragment : BasePreferenceFragment(R.xml.preferences_usb) {
 
     override fun onPreferenceTreeClick(preference: Preference): Boolean {
         if (preference.key == getString(R.string.set_key_usb_retry)) {
-            usbAudioManager.debugRetryActivation()
+            usbAudioManager.retryActivation()
             return true
         }
         if (preference.key == getString(R.string.set_key_usb_capabilities)) {

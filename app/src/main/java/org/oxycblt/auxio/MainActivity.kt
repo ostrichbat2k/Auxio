@@ -80,7 +80,7 @@ class MainActivity : AppCompatActivity() {
             addContentView(
                 Button(this).apply {
                     text = "Retry USB DAC"
-                    setOnClickListener { usbAudioManager.debugRetryActivation() }
+                    setOnClickListener { usbAudioManager.retryActivation() }
                 },
                 FrameLayout.LayoutParams(
                         FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT)
