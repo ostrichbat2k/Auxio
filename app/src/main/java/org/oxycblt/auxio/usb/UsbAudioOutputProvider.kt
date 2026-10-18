@@ -162,33 +162,9 @@ class UsbAudioOutputProvider(
                 f.sampleRate in acceptedSampleRates(candidate)
         }
 
-    /**
-     * The best integer device format to convert *float* PCM down to -- FFmpegAudioRenderer's
-     * decoder can only ever natively output 16-bit integer or 32-bit float (confirmed against
-     * the live upstream `androidx/media` source, not just this project's vendored copy: no
-     * version of it has native 24-bit integer output), so a genuinely higher-bit-depth source
-     * (e.g. 24-bit FLAC) could never get anything better than silently-truncated 16-bit through
-     * this app at all. 32-bit float has ~24 bits of mantissa precision -- exactly enough to
-     * round-trip real 24-bit integer audio losslessly -- so this picks the device's own highest
-     * available integer bit depth (preferring 32- over 24-bit) as the conversion target, and
-     * [getFormatSupport] reporting that we accept [C.ENCODING_PCM_FLOAT] directly is what makes
-     * `FfmpegAudioRenderer.shouldOutputFloat()` (its own existing, unmodified decision logic --
-     * see that method) prefer float decode over 16-bit for every track, not just high-res ones.
-     * [UsbAudioOutput] does the actual float-to-integer conversion, in [write], once per sample.
-     */
-    private fun floatTargetFormat(targetChannels: Int, sampleRate: Int): UacStreamFormat? =
-        allFormats
-            .filter { it.subslotSize >= 3 && targetChannels == channels && sampleRate in acceptedSampleRates(it) }
-            .maxByOrNull { it.subslotSize }
-
     override fun getFormatSupport(formatConfig: AudioOutputProvider.FormatConfig): AudioOutputProvider.FormatSupport {
         val format = formatConfig.format
-        val match =
-            if (format.pcmEncoding == C.ENCODING_PCM_FLOAT) {
-                floatTargetFormat(format.channelCount, format.sampleRate)
-            } else {
-                matchingFormat(format)
-            }
+        val match = matchingFormat(format)
         // Logged on every track (not just failures) -- the file's actual decoded format, printed
         // here, is what made the earlier 16-bit-vs-24-bit byte-alignment mismatch and the 96kHz
         // rejection both obvious from a single logcat capture instead of having to cross-
@@ -209,15 +185,9 @@ class UsbAudioOutputProvider(
     override fun getOutputConfig(formatConfig: AudioOutputProvider.FormatConfig): AudioOutputProvider.OutputConfig {
         val format = formatConfig.format
         // getFormatSupport already gated on a match existing for this exact format/encoding --
-        // this just has to agree with it. Float input stays float all the way to UsbAudioOutput
-        // (which converts it to whatever floatTargetFormat picked); everything else requests the
-        // matched device format's own real integer encoding.
-        val encoding =
-            if (format.pcmEncoding == C.ENCODING_PCM_FLOAT) {
-                C.ENCODING_PCM_FLOAT
-            } else {
-                matchingFormat(format)?.let { encodingFor(it.subslotSize) } ?: C.ENCODING_PCM_16BIT
-            }
+        // this just has to agree with it, requesting the matched device format's own real
+        // integer encoding.
+        val encoding = matchingFormat(format)?.let { encodingFor(it.subslotSize) } ?: C.ENCODING_PCM_16BIT
         val channelMask = channelMaskFor(channels)
         return AudioOutputProvider.OutputConfig.Builder()
             .setEncoding(encoding)
@@ -233,23 +203,14 @@ class UsbAudioOutputProvider(
         // Only called when DefaultAudioSink has already decided the OutputConfig genuinely
         // changed (AudioOutput.canReuseAudioOutput's default contract) -- so this is exactly the
         // point, and the only point, where switching the device's alt-setting is actually needed.
-        val isFloatInput = config.encoding == C.ENCODING_PCM_FLOAT
         val target =
-            if (isFloatInput) {
-                floatTargetFormat(channels, config.sampleRate)
-                    ?: allFormats.first().also {
-                        L.w("UsbAudioOutputProvider: no float conversion target at ${config.sampleRate}Hz, using ${it.bitResolution}-bit")
-                    }
-            } else {
-                allFormats.firstOrNull { encodingFor(it.subslotSize) == config.encoding }
-                    ?: allFormats.first().also {
-                        L.w("UsbAudioOutputProvider: no format matches encoding=${config.encoding}, using ${it.bitResolution}-bit")
-                    }
-            }
+            allFormats.firstOrNull { encodingFor(it.subslotSize) == config.encoding }
+                ?: allFormats.first().also {
+                    L.w("UsbAudioOutputProvider: no format matches encoding=${config.encoding}, using ${it.bitResolution}-bit")
+                }
         L.i(
             "UsbAudioOutputProvider: activating ${target.bitResolution}-bit/alt=${target.alternateSetting} " +
-                "at ${config.sampleRate}Hz for upcoming track" +
-                (if (isFloatInput) " (converting from float)" else ""))
+                "at ${config.sampleRate}Hz for upcoming track")
         usbAudioManager.ensureFormatActive(target, config.sampleRate)
         // Reads usbSettings.volumeDb fresh on every call rather than once at construction time --
         // this provider (and the DefaultAudioSink built from it) is cached and reused for an
@@ -259,8 +220,7 @@ class UsbAudioOutputProvider(
         // the next format/rate change silently reverted to whatever was persisted back when this
         // provider was first created, confirmed reproduced as "volume still wrong on a new song"
         // even after explicitly correcting it on the previous one.
-        return UsbAudioOutput(
-            session, target, channels, config.sampleRate, usbSettings.volumeDb, isFloatInput, usbAudioManager)
+        return UsbAudioOutput(session, target, channels, config.sampleRate, usbSettings.volumeDb, usbAudioManager)
     }
 
     override fun addListener(listener: AudioOutputProvider.Listener) {}

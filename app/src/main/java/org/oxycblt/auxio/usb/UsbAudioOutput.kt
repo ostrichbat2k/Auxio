@@ -58,11 +58,6 @@ class UsbAudioOutput(
     private val channels: Int,
     private val sampleRateHz: Int,
     private val initialVolumeDb: Int?,
-    // True when UsbAudioOutputProvider picked this device format as a *conversion target* for
-    // 32-bit float PCM (FfmpegAudioRenderer's only way to get real higher-than-16-bit precision
-    // out of a device whose own Feature Unit works in integer, not float) rather than ExoPlayer
-    // already producing this format's own native encoding directly. write() branches on this.
-    private val isFloatInput: Boolean = false,
     // So pause()/play() can hand the raw interface back to Android's own USB-audio HAL whenever
     // this instance genuinely stops being used, and reclaim it when actually needed again --
     // see activateAndStream()/pause()'s doc comments.
@@ -94,9 +89,6 @@ class UsbAudioOutput(
     private val bytesPerFrame = channels * format.subslotSize
     private var ringBuffer = PcmRingBuffer(bytesPerFrame * sampleRateHz * RING_BUFFER_MS / 1000)
     private var framesWritten = 0L
-    // Only used when isFloatInput -- reused across write() calls the same way UsbAudioOutput's
-    // own URB buffers are, to avoid allocating on every single call.
-    private var floatConversionBuffer = ByteArray(0)
     // Frames actually handed to the device via a paced, submitted URB -- i.e. audibly played,
     // not just sitting in [ringBuffer]. [getPositionUs] MUST report this, not [framesWritten]:
     // DefaultAudioSink.hasAudioOutputPendingData() compares its own written-frame count against

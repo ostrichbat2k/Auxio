@@ -163,8 +163,7 @@ class RoutingAudioSink(private val usbAudioManager: UsbAudioManager, private val
             C.ENCODING_PCM_16BIT -> 16
             C.ENCODING_PCM_24BIT -> 24
             C.ENCODING_PCM_32BIT -> 32
-            // Covers C.ENCODING_PCM_FLOAT (the not-yet-finished 24-bit-via-float path) and
-            // anything else -- no real device bit depth to report yet in that case.
+            // Covers anything else -- no real device bit depth to report in that case.
             else -> null
         }
 
