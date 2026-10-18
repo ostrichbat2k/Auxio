@@ -79,6 +79,7 @@ class ExoPlaybackStateHolder(
     private val replayGainProcessor: ReplayGainAudioProcessor,
     private val musicRepository: MusicRepository,
     private val imageSettings: ImageSettings,
+    private val usbAudioManager: UsbAudioManager,
 ) :
     PlaybackStateHolder,
     Player.Listener,
@@ -164,6 +165,15 @@ class ExoPlaybackStateHolder(
                 L.d("Restoring playback state")
                 restoreScope.launch {
                     val state = persistenceRepository.readState()
+                    if (action.play || (state == null && action.fallback != null)) {
+                        // This is about to start playback -- give a DAC that's still finishing
+                        // activation (e.g. right after a cold-launch permission grant racing this
+                        // same restore) a bounded chance to be ready first. Without this, the
+                        // very first configure() call commits this track to the fallback sink
+                        // with no recovery short of the user manually changing tracks -- see
+                        // UsbAudioManager.awaitActivation's doc comment.
+                        usbAudioManager.awaitActivation()
+                    }
                     withContext(Dispatchers.Main) {
                         if (state != null) {
                             // Apply the saved state on the main thread to prevent code expecting
@@ -747,6 +757,7 @@ class ExoPlaybackStateHolder(
                 replayGainProcessor,
                 musicRepository,
                 imageSettings,
+                usbAudioManager,
             )
         }
     }
