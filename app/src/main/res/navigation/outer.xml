@@ -80,7 +80,16 @@
     <fragment
         android:id="@+id/usb_preferences_fragment"
         android:name="org.oxycblt.auxio.settings.categories.UsbPreferenceFragment"
-        android:label="usb_preferences_fragment" />
+        android:label="usb_preferences_fragment">
+        <action
+            android:id="@+id/usb_capabilities"
+            app:destination="@id/usb_capabilities_fragment" />
+    </fragment>
+
+    <fragment
+        android:id="@+id/usb_capabilities_fragment"
+        android:name="org.oxycblt.auxio.settings.categories.UsbCapabilitiesFragment"
+        android:label="usb_capabilities_fragment" />
 
     <dialog
         android:id="@+id/accent_dialog"

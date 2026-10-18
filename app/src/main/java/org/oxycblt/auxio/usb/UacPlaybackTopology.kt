@@ -76,6 +76,13 @@ data class UacPlaybackTopology(
     val powerDomainD1RecoveryUs: Int,
     /** D2->D0 recovery time in microseconds (waRecoveryTime2 * 50us), or 0 if unknown. */
     val powerDomainD2RecoveryUs: Int,
+    /**
+     * The channel count declared on the USB Streaming Input Terminal (e.g. 2 for stereo), or -1
+     * if unknown. UAC 1.0/2.0 carry this directly on the Input Terminal; UAC 3.0 pushes it into a
+     * separate Cluster Descriptor fetch this parser doesn't do, so it's always -1 there -- callers
+     * should fall back to assuming stereo rather than treat -1 as "mono" or similar.
+     */
+    val channelCount: Int,
     val formats: List<UacStreamFormat>,
 )
 

@@ -71,7 +71,7 @@ object UsbAudioInspector {
             if (muted != false) {
                 UsbAudioController.setMute(session, muted = false)
             }
-            for (channel in 1..2) {
+            for (channel in 1..found.channelCount.coerceAtLeast(2)) {
                 val volume = UsbAudioController.getVolume(session, channel)
                 L.i("Phase 4 probe: channel $channel volume=$volume (1/256 dB, 0=unity)")
                 if (volume == null || volume < 0) {
@@ -84,7 +84,7 @@ object UsbAudioInspector {
             // is just less data to push while proving the pipeline out.
             val selected = found.formats.minByOrNull { it.bitResolution }
             if (selected != null && setClock && UsbAudioController.selectFormat(session, selected)) {
-                IsoToneTest.play(session, selected, sampleRateHz, durationMs = 3000)
+                IsoToneTest.play(session, selected, sampleRateHz, durationMs = 3000, channels = found.channelCount.coerceAtLeast(2))
             } else {
                 L.w("Skipping tone test: clock/format setup did not succeed")
             }

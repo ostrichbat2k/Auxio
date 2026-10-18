@@ -20,6 +20,7 @@ package org.oxycblt.auxio.settings.categories
 
 import android.os.Bundle
 import android.view.View
+import androidx.navigation.fragment.findNavController
 import androidx.preference.ListPreference
 import androidx.preference.Preference
 import androidx.preference.PreferenceCategory
@@ -33,7 +34,9 @@ import org.oxycblt.auxio.usb.UsbAudioDevice
 import org.oxycblt.auxio.usb.UsbAudioManager
 import org.oxycblt.auxio.usb.UsbControlState
 import org.oxycblt.auxio.usb.UsbDeviceCapabilities
+import org.oxycblt.auxio.usb.UsbSettings
 import org.oxycblt.auxio.util.collectImmediately
+import org.oxycblt.auxio.util.navigateSafe
 
 /**
  * USB DAC status and activation log, for diagnosing direct USB audio output -- shows whatever's
@@ -44,6 +47,7 @@ import org.oxycblt.auxio.util.collectImmediately
 @AndroidEntryPoint
 class UsbPreferenceFragment : BasePreferenceFragment(R.xml.preferences_usb) {
     @Inject lateinit var usbAudioManager: UsbAudioManager
+    @Inject lateinit var usbSettings: UsbSettings
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
@@ -83,77 +87,17 @@ class UsbPreferenceFragment : BasePreferenceFragment(R.xml.preferences_usb) {
     }
 
     /**
-     * Rebuilds the read-only "Capabilities" category from everything [UsbAudioDescriptorParser]
-     * found on the attached device's descriptors -- independent of whether Auxio went on to
-     * successfully configure it, so this still populates even if [updateControls] ends up showing
-     * no active session.
+     * Updates the "Capabilities" entry point's summary with a one-line preview of what's been
+     * found so far -- the full, explained breakdown lives on [UsbCapabilitiesFragment], navigated
+     * to on tap (see [onPreferenceTreeClick]). Independent of whether Auxio went on to
+     * successfully configure the device, so this still updates even if [updateControls] ends up
+     * showing no active session.
      */
     private fun updateCapabilities(capabilities: UsbDeviceCapabilities?) {
-        val category =
-            findPreference<PreferenceCategory>(getString(R.string.set_key_usb_capabilities_category))
-                ?: return
-        category.removeAll()
-
-        if (capabilities == null) {
-            category.addPreference(
-                Preference(requireContext()).apply {
-                    isSelectable = false
-                    title = getString(R.string.set_usb_capabilities_none)
-                })
-            return
-        }
-
-        val topology = capabilities.topology
-        val lines =
-            buildList {
-                add(
-                    "Device: ${capabilities.deviceName} " +
-                        "(%04x:%04x)".format(capabilities.vendorId, capabilities.productId))
-                add("USB Audio Class: UAC ${topology.uacVersion}.0")
-                add("Configuration value: ${topology.configurationValue}")
-                add("Control interface: ${topology.controlInterfaceNumber}")
-                add("Streaming interface: ${topology.streamingInterfaceNumber}")
-                add("Clock source ID: ${topology.clockSourceId}")
-                add(
-                    "Output feature unit ID: " +
-                        if (topology.outputFeatureUnitId >= 0) "${topology.outputFeatureUnitId}"
-                        else "none found")
-                add(
-                    "Mixer unit ID: " +
-                        if (topology.mixerUnitId >= 0) {
-                            "${topology.mixerUnitId} (input channel base ${topology.mixerInputChannelBase})"
-                        } else {
-                            "none"
-                        })
-                add(
-                    "Power domain: " +
-                        if (topology.powerDomainId >= 0) {
-                            "ID ${topology.powerDomainId}, D1 recovery ${topology.powerDomainD1RecoveryUs}us, " +
-                                "D2 recovery ${topology.powerDomainD2RecoveryUs}us"
-                        } else {
-                            "none (UAC ${topology.uacVersion}.0 has no power domain concept)"
-                        })
-                for (format in topology.formats) {
-                    add(
-                        "Format alt=${format.alternateSetting}: ${format.bitResolution}-bit / " +
-                            "${format.subslotSize}-byte subslot, endpoint 0x" +
-                            "%02x".format(format.endpointAddress) +
-                            ", max packet ${format.maxPacketSize}B, " +
-                            (if (format.isAsync) "async" else "sync") +
-                            (if (format.clusterDescriptorId >= 0) ", cluster ${format.clusterDescriptorId}"
-                            else "") +
-                            (if (format.sampleRates.isNotEmpty())
-                                ", rates ${format.sampleRates.joinToString("/") { "${it}Hz" }}"
-                            else ""))
-                }
-            }
-        for (line in lines) {
-            category.addPreference(
-                Preference(requireContext()).apply {
-                    isSelectable = false
-                    title = line
-                })
-        }
+        val summary =
+            capabilities?.let { "${it.deviceName} -- UAC ${it.topology.uacVersion}.0" }
+                ?: getString(R.string.set_usb_capabilities_none)
+        findPreference<Preference>(getString(R.string.set_key_usb_capabilities))?.summary = summary
     }
 
     /**
@@ -163,6 +107,8 @@ class UsbPreferenceFragment : BasePreferenceFragment(R.xml.preferences_usb) {
      * device model.
      */
     private fun updateControls(state: UsbControlState?) {
+        updateBitPerfectAvailability(state)
+
         val category =
             findPreference<PreferenceCategory>(getString(R.string.set_key_usb_controls_category))
                 ?: return
@@ -216,7 +162,7 @@ class UsbPreferenceFragment : BasePreferenceFragment(R.xml.preferences_usb) {
                     min = volumeRange.first
                     max = volumeRange.second
                     showSeekBarValue = true
-                    value = (state.volume ?: volumeRange.second).coerceIn(min, max)
+                    value = (state.volume ?: usbSettings.volumeDb ?: volumeRange.second).coerceIn(min, max)
                     setOnPreferenceChangeListener { _, newValue ->
                         usbAudioManager.setVolume(newValue as Int)
                         true
@@ -246,9 +192,29 @@ class UsbPreferenceFragment : BasePreferenceFragment(R.xml.preferences_usb) {
         }
     }
 
+    /**
+     * Grays out the "Bit-perfect mode" switch with an explanation whenever
+     * [UsbAudioManager.isBitPerfectCapable] says no -- toggling it would otherwise do nothing
+     * observable (createAudioSink already refuses to use USB output in that case), which reads as
+     * a silent failure rather than the device genuinely not supporting it.
+     */
+    private fun updateBitPerfectAvailability(state: UsbControlState?) {
+        val preference =
+            findPreference<SwitchPreferenceCompat>(getString(R.string.set_key_usb_bit_perfect)) ?: return
+        val capable = state?.volumeRange != null
+        preference.isEnabled = capable
+        preference.summary =
+            if (capable) getString(R.string.set_usb_bit_perfect_desc)
+            else getString(R.string.set_usb_bit_perfect_not_capable)
+    }
+
     override fun onPreferenceTreeClick(preference: Preference): Boolean {
         if (preference.key == getString(R.string.set_key_usb_retry)) {
             usbAudioManager.debugRetryActivation()
+            return true
+        }
+        if (preference.key == getString(R.string.set_key_usb_capabilities)) {
+            findNavController().navigateSafe(UsbPreferenceFragmentDirections.usbCapabilities())
             return true
         }
         return super.onPreferenceTreeClick(preference)

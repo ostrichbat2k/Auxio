@@ -32,6 +32,13 @@ object UsbNative {
     external fun disconnectKernelDriver(fd: Int, interfaceNumber: Int): Boolean
 
     /**
+     * The negotiated USB_SPEED_* value for the device at [fd] (0=unknown 1=low 2=full 3=high
+     * 4=wireless 5=super 6=super+, per the kernel's `linux/usb/ch9.h`), or -1 on error. See the
+     * native implementation's doc comment for why this matters for isochronous pacing.
+     */
+    external fun getUsbSpeed(fd: Int): Int
+
+    /**
      * Allocates [numUrbs] isochronous URBs of [packetsPerUrb] packets each (every packet
      * [maxPacketSize] bytes) for [endpointAddress] on [fd]. Returns an opaque native handle, or 0
      * on failure.

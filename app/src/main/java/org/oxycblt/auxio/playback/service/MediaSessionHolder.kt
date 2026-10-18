@@ -22,6 +22,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.media.AudioManager
 import android.os.Build
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
@@ -29,12 +30,17 @@ import android.support.v4.media.session.PlaybackStateCompat
 import androidx.annotation.DrawableRes
 import androidx.car.app.mediaextensions.MetadataExtras
 import androidx.core.app.NotificationCompat
+import androidx.media.VolumeProviderCompat
 import androidx.media.app.NotificationCompat.MediaStyle
 import androidx.media.session.MediaButtonReceiver
 import coil3.request.CachePolicy
 import coil3.request.ImageRequest
 import coil3.request.allowHardware
 import javax.inject.Inject
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import org.oxycblt.auxio.BuildConfig
 import org.oxycblt.auxio.ForegroundListener
 import org.oxycblt.auxio.ForegroundServiceNotification
@@ -50,6 +56,8 @@ import org.oxycblt.auxio.playback.state.PlaybackStateManager
 import org.oxycblt.auxio.playback.state.Progression
 import org.oxycblt.auxio.playback.state.QueueChange
 import org.oxycblt.auxio.playback.state.RepeatMode
+import org.oxycblt.auxio.usb.UsbAudioManager
+import org.oxycblt.auxio.usb.UsbSettings
 import org.oxycblt.auxio.util.newBroadcastPendingIntent
 import org.oxycblt.auxio.util.newMainPendingIntent
 import org.oxycblt.musikr.MusicParent
@@ -70,7 +78,9 @@ private constructor(
     private val bitmapProvider: BitmapProvider,
     private val imageSettings: ImageSettings,
     private val mediaSessionInterface: MediaSessionInterface,
-) : PlaybackStateManager.Listener, ImageSettings.Listener {
+    private val usbAudioManager: UsbAudioManager,
+    private val usbSettings: UsbSettings,
+) : PlaybackStateManager.Listener, ImageSettings.Listener, UsbSettings.Listener {
 
     class Factory
     @Inject
@@ -79,6 +89,8 @@ private constructor(
         private val bitmapProvider: BitmapProvider,
         private val imageSettings: ImageSettings,
         private val mediaSessionInterface: MediaSessionInterface,
+        private val usbAudioManager: UsbAudioManager,
+        private val usbSettings: UsbSettings,
     ) {
         fun create(context: Context, foregroundListener: ForegroundListener) =
             MediaSessionHolder(
@@ -88,6 +100,8 @@ private constructor(
                 bitmapProvider,
                 imageSettings,
                 mediaSessionInterface,
+                usbAudioManager,
+                usbSettings,
             )
     }
 
@@ -98,13 +112,21 @@ private constructor(
     val notification: ForegroundServiceNotification
         field = PlaybackNotification(context, mediaSession.sessionToken)
 
+    private val volumeJob = Job()
+    private val volumeScope = CoroutineScope(Dispatchers.Main + volumeJob)
+    private val usbVolumeProvider = UsbVolumeProvider()
+
     fun attach() {
         playbackManager.addListener(this)
         imageSettings.registerListener(this)
+        usbSettings.registerListener(this)
         mediaSession.apply {
             isActive = true
             setQueueTitle(context.getString(R.string.lbl_queue))
             setCallback(mediaSessionInterface)
+        }
+        volumeScope.launch {
+            usbAudioManager.controlState.collect { updateVolumeRouting() }
         }
     }
 
@@ -116,12 +138,100 @@ private constructor(
      * the [PlaybackNotification].
      */
     fun release() {
+        volumeJob.cancel()
         bitmapProvider.release()
         playbackManager.removeListener(this)
         imageSettings.unregisterListener(this)
+        usbSettings.unregisterListener(this)
         mediaSession.apply {
             isActive = false
             release()
+        }
+    }
+
+    // --- USBSETTINGS OVERRIDES ---
+
+    override fun onBitPerfectModeChanged() {
+        updateVolumeRouting()
+    }
+
+    /**
+     * Routes the device's physical volume keys to the DAC's own hardware volume (via
+     * [usbAudioManager]) instead of Android's normal [AudioManager.STREAM_MUSIC] handling,
+     * whenever the DAC is actually what's receiving audio right now.
+     *
+     * Direct USB output ([UsbAudioOutput][org.oxycblt.auxio.usb.UsbAudioOutput]) bypasses
+     * AudioTrack/AudioFlinger entirely, so [AudioManager.STREAM_MUSIC] -- what physical volume
+     * keys adjust by default -- has no connection whatsoever to what's actually reaching the
+     * DAC: the keys would move a slider that does nothing audible. [MediaSessionCompat
+     * .setPlaybackToRemote] is the standard mechanism for exactly this (the same one a
+     * Cast/Bluetooth-AVRCP-absolute-volume session uses) -- it hands volume key events to
+     * [usbVolumeProvider] instead, which forwards them to the Feature Unit via
+     * [usbAudioManager]. [usbAudioManager.createAudioSink] is null unless
+     * [UsbSettings.bitPerfectMode] is on *and* the device's volume range was actually read back
+     * successfully ([UsbAudioManager.isBitPerfectCapable]) -- the same condition
+     * [org.oxycblt.auxio.usb.RoutingAudioSink] uses to decide whether a track actually gets
+     * routed to the DAC, so this mirrors that rather than inventing a separate notion of "DAC
+     * active".
+     */
+    private fun updateVolumeRouting() {
+        val range = usbAudioManager.controlState.value?.volumeRange
+        if (usbSettings.bitPerfectMode && range != null) {
+            usbVolumeProvider.applyRange(range)
+            mediaSession.setPlaybackToRemote(usbVolumeProvider)
+        } else {
+            mediaSession.setPlaybackToLocal(AudioManager.STREAM_MUSIC)
+        }
+    }
+
+    /**
+     * Translates the system volume UI's abstract 0..[VOLUME_STEPS] scale to/from the DAC's own
+     * raw dB*256 Feature Unit range, since [VolumeProviderCompat] needs a small fixed step count
+     * (matching what a physical volume key press should move by) rather than the device's often
+     * much finer native resolution.
+     */
+    private inner class UsbVolumeProvider :
+        VolumeProviderCompat(VOLUME_CONTROL_ABSOLUTE, VOLUME_STEPS, 0) {
+        private var range: Pair<Int, Int> = 0 to 0
+
+        fun applyRange(newRange: Pair<Int, Int>) {
+            range = newRange
+            // controlState.volume is the device's own live GET_CUR readback, which is null here
+            // on every fresh activation on hardware that fails that query (confirmed: this is
+            // the normal case on the FiiO Snowsky Tiny A, not an edge case) -- true right up
+            // until a track actually plays and UsbAudioOutput's own init block establishes a
+            // real value. Falling back straight to newRange.second (hardware max) in that gap
+            // published "volume = max" to the system UI the instant a device activates, which
+            // was confirmed to cause the system to (re-)apply max as the real volume on the very
+            // next track -- i.e. "new song is at max until you touch the volume key once".
+            // usbSettings.volumeDb (the user's last explicitly-chosen level, persisted) is the
+            // correct thing to show in that gap instead; range max is only a last resort for a
+            // genuinely first-ever-seen device.
+            val db = usbAudioManager.controlState.value?.volume ?: usbSettings.volumeDb ?: newRange.second
+            currentVolume = dbToStep(db)
+        }
+
+        override fun onSetVolumeTo(volume: Int) {
+            val step = volume.coerceIn(0, VOLUME_STEPS)
+            usbAudioManager.setVolume(stepToDb(step))
+            currentVolume = step
+        }
+
+        override fun onAdjustVolume(direction: Int) {
+            val step = (currentVolume + direction).coerceIn(0, VOLUME_STEPS)
+            usbAudioManager.setVolume(stepToDb(step))
+            currentVolume = step
+        }
+
+        private fun stepToDb(step: Int): Int {
+            val (min, max) = range
+            return min + (max - min) * step / VOLUME_STEPS
+        }
+
+        private fun dbToStep(db: Int): Int {
+            val (min, max) = range
+            if (max == min) return 0
+            return ((db - min) * VOLUME_STEPS / (max - min)).coerceIn(0, VOLUME_STEPS)
         }
     }
 
@@ -380,6 +490,13 @@ private constructor(
 
     companion object {
         private val emptyMetadata = MediaMetadataCompat.Builder().build()
+
+        /**
+         * How many discrete clicks the system volume UI shows for the DAC's remote volume, and
+         * how much one physical volume key press moves it by. Independent of the device's actual
+         * native dB resolution -- see [UsbVolumeProvider].
+         */
+        private const val VOLUME_STEPS = 20
     }
 }
 

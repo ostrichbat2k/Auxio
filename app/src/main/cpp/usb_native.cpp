@@ -48,6 +48,22 @@ Java_org_oxycblt_auxio_usb_UsbNative_disconnectKernelDriver(
     return ret == 0 ? JNI_TRUE : JNI_FALSE;
 }
 
+// Returns the negotiated USB_SPEED_* value (0=unknown 1=low 2=full 3=high 4=wireless 5=super
+// 6=super+, per linux/usb/ch9.h) for the device at [fd], or -1 on error. Checking this directly
+// matters here: this codebase's isochronous pacing (IsoPacketScheduler.kt, and the real-time wait
+// in UsbAudioOutput's streaming thread) assumes one iso_frame_desc[] entry == 1ms -- true for
+// full-speed, but a high-speed device schedules isochronous packets per *microframe* (125us, 8
+// per ms) instead, at the raw usbdevfs_urb level this code talks to directly. Getting this wrong
+// would mean every packet we size for "1ms of audio" is actually handed to the bus 8x too
+// infrequently relative to its real consumption schedule -- a real candidate for audible
+// crackle that would never show up as a USBDEVFS_SUBMITURB/REAPURB-level error, since the
+// *aggregate* transfer still completes successfully either way.
+extern "C" JNIEXPORT jint JNICALL
+Java_org_oxycblt_auxio_usb_UsbNative_getUsbSpeed(JNIEnv* /*env*/, jobject /*thiz*/, jint fd) {
+    int ret = ioctl(fd, USBDEVFS_GET_SPEED);
+    return (jint) ret;
+}
+
 // ---------------------------------------------------------------------------
 // Isochronous streaming.
 //

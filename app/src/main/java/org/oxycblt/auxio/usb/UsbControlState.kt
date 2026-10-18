@@ -38,4 +38,11 @@ data class UsbControlState(
     val mixerChannels: List<Pair<Int, Int>>,
     val mixerGains: Map<Pair<Int, Int>, Int?>,
     val mixerGainRange: Pair<Int, Int>?,
+    /**
+     * The Clock Source's actual supported sample rate sub-ranges (min..max pairs in Hz), read via
+     * GET_RANGE at activation -- see [UsbAudioSession.clockSupportedRates]. Empty for UAC 1.0 (no
+     * Clock Source) or if the device didn't answer the query, same caveat as there: empty here
+     * means "couldn't ask", not "supports nothing".
+     */
+    val clockSupportedRates: List<Pair<Int, Int>>,
 )

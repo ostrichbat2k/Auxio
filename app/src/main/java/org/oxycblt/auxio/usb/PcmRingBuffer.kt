@@ -51,10 +51,20 @@ class PcmRingBuffer(capacityBytes: Int) {
             written
         }
 
-    /** Fills [dst] with buffered data, zero-padding (silence) if there isn't enough yet. */
-    fun readOrZeroPad(dst: ByteArray) {
+    /**
+     * Fills the first [length] bytes of [dst] with buffered data, zero-padding (silence) if there
+     * isn't enough yet. [length] defaults to [dst]'s full size, but callers reusing a
+     * larger-than-needed buffer across calls (to avoid allocating a fresh one every time) pass it
+     * explicitly so only the bytes actually meant for this call get touched.
+     *
+     * Returns how many bytes were genuinely read from the buffer (i.e. [length] minus how many
+     * were zero-padded) -- callers use this to tell a real underrun (decoder couldn't keep up,
+     * buffer ran dry) apart from an intentional silence request, which this function has no way
+     * to distinguish on its own.
+     */
+    fun readOrZeroPad(dst: ByteArray, length: Int = dst.size): Int {
         synchronized(lock) {
-            val toRead = minOf(dst.size, size)
+            val toRead = minOf(length, size)
             var read = 0
             while (read < toRead) {
                 val chunk = minOf(toRead - read, buffer.size - readPos)
@@ -63,9 +73,10 @@ class PcmRingBuffer(capacityBytes: Int) {
                 read += chunk
             }
             size -= read
-            if (read < dst.size) {
-                dst.fill(0, read, dst.size)
+            if (read < length) {
+                dst.fill(0, read, length)
             }
+            return read
         }
     }
 

@@ -20,21 +20,28 @@ package org.oxycblt.auxio.usb
 
 /**
  * Distributes whole-number sample counts across isochronous packets for sample rates that don't
- * divide evenly into USB's one-packet-per-millisecond schedule -- 44100 Hz is 44.1 samples per
- * packet, not a whole number. Uses a running-remainder (Bresenham-style) distribution: exact over
- * any window, and degenerates to a fixed sample count per packet when the rate does divide evenly
- * (e.g. 48000 Hz -> always exactly 48).
+ * divide evenly into one packet's worth of time -- 44100 Hz is 44.1 samples per 1ms packet, not a
+ * whole number. Uses a running-remainder (Bresenham-style) distribution: exact over any window,
+ * and degenerates to a fixed sample count per packet when the rate does divide evenly (e.g.
+ * 48000 Hz at 1 packet/ms -> always exactly 48).
+ *
+ * [packetsPerSecond] is how many isochronous packets make up one second of real bus time -- 1000
+ * for a full-speed device (one packet per 1ms frame), 8000 for high-speed (one packet per 125us
+ * *microframe* instead -- see [UsbNative.getUsbSpeed]'s doc comment for why this distinction is
+ * essential, not cosmetic: assuming 1000 unconditionally on a high-speed device packs 8x too many
+ * samples into each packet slot relative to how much real bus time it actually occupies).
  */
-class IsoPacketScheduler(sampleRateHz: Int) {
-    private val baseSamplesPerPacket = sampleRateHz / 1000
-    private val remainderPerPacket = sampleRateHz % 1000
+class IsoPacketScheduler(sampleRateHz: Int, packetsPerSecond: Int = 1000) {
+    private val baseSamplesPerPacket = sampleRateHz / packetsPerSecond
+    private val remainderPerPacket = sampleRateHz % packetsPerSecond
+    private val packetsPerSecond = packetsPerSecond
     private var accumulator = 0
 
     /** Returns the number of samples the next packet should carry. */
     fun nextPacketSampleCount(): Int {
         accumulator += remainderPerPacket
-        return if (accumulator >= 1000) {
-            accumulator -= 1000
+        return if (accumulator >= packetsPerSecond) {
+            accumulator -= packetsPerSecond
             baseSamplesPerPacket + 1
         } else {
             baseSamplesPerPacket

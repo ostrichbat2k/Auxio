@@ -29,20 +29,45 @@ import timber.log.Timber as L
  * bit-perfect playback works end to end at the protocol level.
  */
 object IsoToneTest {
-    private const val PACKETS_PER_URB = 8
+    // Target real URB duration at full-speed (8 packets * 1ms); scaled up for high-speed devices
+    // below, same reasoning as UsbAudioOutput.BASE_PACKETS_PER_URB.
+    private const val BASE_PACKETS_PER_URB = 8
     private const val NUM_URBS = 4
     private const val FREQUENCY_HZ = 440.0
-    private const val CHANNELS = 2
+    private const val FALLBACK_CHANNELS = 2
     private const val AMPLITUDE = 0.2 // quiet on purpose, this goes straight into someone's ears
 
-    /** Plays a sine tone for [durationMs] at [sampleRateHz] using [format]'s packet/bit layout. */
-    fun play(session: UsbAudioSession, format: UacStreamFormat, sampleRateHz: Int, durationMs: Long) {
+    /**
+     * Plays a sine tone for [durationMs] at [sampleRateHz] using [format]'s packet/bit layout,
+     * on every channel the device actually has ([channels], from its own Input Terminal
+     * descriptor -- not assumed stereo) in phase with each other.
+     */
+    fun play(
+        session: UsbAudioSession,
+        format: UacStreamFormat,
+        sampleRateHz: Int,
+        durationMs: Long,
+        channels: Int = FALLBACK_CHANNELS,
+    ) {
         val bytesPerSample = format.subslotSize
-        val bytesPerFrame = CHANNELS * bytesPerSample
+        val bytesPerFrame = channels * bytesPerSample
 
         val fd = session.connection.fileDescriptor
+
+        // Same fix as UsbAudioOutput's streaming thread: a high-speed device schedules one iso
+        // packet per 125us microframe, not per 1ms frame. Packing a full millisecond's worth of
+        // samples into each packet (the old, speed-unaware behavior here) fed the device audio
+        // 8x faster than its own playback clock could drain it -- the exact bug that made real
+        // playback crackle on this hardware, and this tool shares the same native plumbing, so it
+        // shared the bug too. See UsbAudioOutput.startStreamingThread's doc comment for the full
+        // explanation.
+        val usbSpeed = UsbNative.getUsbSpeed(fd)
+        val packetsPerSecond = if (usbSpeed == 3) 8000 else 1000
+        val packetDurationNs = 1_000_000_000L / packetsPerSecond
+        val packetsPerUrb = BASE_PACKETS_PER_URB * (packetsPerSecond / 1000)
+
         val handle =
-            UsbNative.openIsoStream(fd, format.endpointAddress, format.maxPacketSize, PACKETS_PER_URB, NUM_URBS)
+            UsbNative.openIsoStream(fd, format.endpointAddress, format.maxPacketSize, packetsPerUrb, NUM_URBS)
         if (handle == 0L) {
             L.w("Failed to open iso stream")
             return
@@ -51,12 +76,12 @@ object IsoToneTest {
         var phase = 0.0
         val phaseStep = 2.0 * PI * FREQUENCY_HZ / sampleRateHz
         val peak = maxAmplitudeFor(bytesPerSample)
-        val scheduler = IsoPacketScheduler(sampleRateHz)
+        val scheduler = IsoPacketScheduler(sampleRateHz, packetsPerSecond)
 
         fun buildUrb(): Pair<ByteArray, IntArray> {
-            val packetLengths = IntArray(PACKETS_PER_URB)
+            val packetLengths = IntArray(packetsPerUrb)
             var total = 0
-            for (p in 0 until PACKETS_PER_URB) {
+            for (p in 0 until packetsPerUrb) {
                 val bytes = scheduler.nextPacketSampleCount() * bytesPerFrame
                 packetLengths[p] = bytes
                 total += bytes
@@ -67,7 +92,7 @@ object IsoToneTest {
                 val value = (sin(phase) * AMPLITUDE * peak).toInt()
                 phase += phaseStep
                 if (phase > 2.0 * PI) phase -= 2.0 * PI
-                repeat(CHANNELS) {
+                repeat(channels) {
                     writeSample(buf, offset, value, bytesPerSample)
                     offset += bytesPerSample
                 }
@@ -75,13 +100,22 @@ object IsoToneTest {
             return buf to packetLengths
         }
 
-        L.i("Starting iso tone test: $sampleRateHz Hz, ${format.bitResolution}-bit, $durationMs ms")
+        L.i(
+            "Starting iso tone test: $sampleRateHz Hz, ${format.bitResolution}-bit, $durationMs ms, " +
+                "usbSpeed=$usbSpeed ($packetsPerSecond packets/sec, $packetsPerUrb packets/urb)")
         try {
             for (slot in 0 until NUM_URBS) {
                 val (chunk, lengths) = buildUrb()
                 UsbNative.submitIso(handle, slot, chunk, lengths)
             }
 
+            // Explicit wall-clock pacing, not just reapIso()'s own timing -- confirmed, on real
+            // hardware, that reapIso() alone races ahead of real-time by however much faster the
+            // true packet duration is than this loop assumes (the same discrepancy
+            // UsbAudioOutput's streaming thread had to correct for).
+            val streamStartNs = System.nanoTime()
+            val urbRealTimeNs = packetsPerUrb * packetDurationNs
+            var urbsPaced = 0L
             val deadline = System.currentTimeMillis() + durationMs
             var submitted = 0
             var errors = 0
@@ -95,6 +129,11 @@ object IsoToneTest {
                         break
                     }
                     continue
+                }
+                urbsPaced++
+                val waitNs = (streamStartNs + urbsPaced * urbRealTimeNs) - System.nanoTime()
+                if (waitNs > 0) {
+                    Thread.sleep(waitNs / 1_000_000L, (waitNs % 1_000_000L).toInt())
                 }
                 val (chunk, lengths) = buildUrb()
                 // The return value here was previously ignored, which let URBs silently fail to

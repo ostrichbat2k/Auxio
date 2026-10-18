@@ -388,6 +388,7 @@ object UsbAudioDescriptorParser {
             powerDomainId = powerDomain?.id ?: -1,
             powerDomainD1RecoveryUs = powerDomain?.d1RecoveryUs ?: 0,
             powerDomainD2RecoveryUs = powerDomain?.d2RecoveryUs ?: 0,
+            channelCount = -1, // not parsed for UAC3 -- see UacPlaybackTopology.channelCount
             formats = formats)
     }
 
@@ -570,6 +571,7 @@ object UsbAudioDescriptorParser {
             powerDomainId = -1,
             powerDomainD1RecoveryUs = 0,
             powerDomainD2RecoveryUs = 0,
+            channelCount = terminalChannelCounts[usbStreamingTerminalId] ?: -1,
             formats = formats)
     }
 
@@ -767,6 +769,7 @@ object UsbAudioDescriptorParser {
             powerDomainId = -1,
             powerDomainD1RecoveryUs = 0,
             powerDomainD2RecoveryUs = 0,
+            channelCount = terminalChannelCounts[usbStreamingTerminalId] ?: -1,
             formats = formats)
     }
 }

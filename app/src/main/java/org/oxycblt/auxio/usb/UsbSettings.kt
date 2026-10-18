@@ -19,6 +19,7 @@
 package org.oxycblt.auxio.usb
 
 import android.content.Context
+import androidx.core.content.edit
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import org.oxycblt.auxio.R
@@ -36,9 +37,30 @@ interface UsbSettings : Settings<UsbSettings.Listener> {
      */
     val enabled: Boolean
 
+    /**
+     * Whether USB output should actually be used for playback. Distinct from [enabled]: a device
+     * can be activated (and its Controls/Capabilities screens usable) without this -- audio only
+     * ever routes to it once this is also on. Only meaningful (and only ever shown in the UI as
+     * toggleable) when the attached device is bit-perfect capable; see
+     * [UsbAudioManager.isBitPerfectCapable].
+     */
+    val bitPerfectMode: Boolean
+
+    /**
+     * The last hardware volume (raw dB*256 Feature Unit units) explicitly set via
+     * [UsbAudioManager.setVolume] -- by the physical volume keys or the Settings screen's slider
+     * -- or null if never set. Applied as the starting volume the next time a device is
+     * activated (see [UsbAudioOutput]'s constructor) instead of a fixed default, so the user's
+     * chosen level survives an app restart/DAC reconnect instead of resetting every time.
+     */
+    var volumeDb: Int?
+
     interface Listener {
         /** Called when [enabled] has changed. */
         fun onUsbEnabledChanged() {}
+
+        /** Called when [bitPerfectMode] has changed. */
+        fun onBitPerfectModeChanged() {}
     }
 }
 
@@ -47,9 +69,25 @@ class UsbSettingsImpl @Inject constructor(@ApplicationContext context: Context) 
     override val enabled: Boolean
         get() = sharedPreferences.getBoolean(getString(R.string.set_key_usb_enabled), false)
 
+    override val bitPerfectMode: Boolean
+        get() = sharedPreferences.getBoolean(getString(R.string.set_key_usb_bit_perfect), false)
+
+    override var volumeDb: Int?
+        get() =
+            getString(R.string.set_key_usb_volume).let { key ->
+                if (sharedPreferences.contains(key)) sharedPreferences.getInt(key, 0) else null
+            }
+        set(value) {
+            sharedPreferences.edit {
+                val key = getString(R.string.set_key_usb_volume)
+                if (value != null) putInt(key, value) else remove(key)
+            }
+        }
+
     override fun onSettingChanged(key: String, listener: UsbSettings.Listener) {
-        if (key == getString(R.string.set_key_usb_enabled)) {
-            listener.onUsbEnabledChanged()
+        when (key) {
+            getString(R.string.set_key_usb_enabled) -> listener.onUsbEnabledChanged()
+            getString(R.string.set_key_usb_bit_perfect) -> listener.onBitPerfectModeChanged()
         }
     }
 }

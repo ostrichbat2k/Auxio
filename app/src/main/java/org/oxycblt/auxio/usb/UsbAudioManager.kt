@@ -29,10 +29,12 @@ import android.hardware.usb.UsbManager
 import android.os.Build
 import android.widget.Toast
 import androidx.media3.exoplayer.audio.AudioSink
+import androidx.media3.exoplayer.audio.DefaultAudioSink
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.Executors
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -47,10 +49,9 @@ import timber.log.Timber as L
  * [createAudioSink] hands out an [AudioSink] wired to that session for the player to use in place
  * of the normal AudioTrack-backed sink.
  *
- * Direct USB output supports 44100 and 48000 Hz -- the two rates this device's clock source was
- * confirmed to accept -- with [UsbAudioSink] reconfiguring the DAC's clock to match each track as
- * needed (see [IsoPacketScheduler] for how 44100 Hz, which isn't a whole number of samples per
- * USB's 1ms isochronous packet, is handled without a fixed packet size).
+ * Direct USB output reconfigures the DAC's clock to match each track's actual rate (see
+ * [UsbAudioOutput], and [IsoPacketScheduler] for how 44100 Hz, which isn't a whole number of
+ * samples per USB's 1ms isochronous packet, is handled without a fixed packet size).
  */
 @Singleton
 class UsbAudioManager
@@ -91,9 +92,12 @@ constructor(@ApplicationContext private val context: Context, private val usbSet
 
     @Volatile private var activeSession: UsbAudioSession? = null
     @Volatile private var activeFormat: UacStreamFormat? = null
-    // UAC 2.0/3.0 always stream at SUPPORTED_SAMPLE_RATE_HZ (the clock source is set to it
-    // directly); UAC 1.0 negotiates per-format instead (see activateDac), so the actual active
-    // rate has to be tracked rather than assumed.
+    // Only reflects SUPPORTED_SAMPLE_RATE_HZ (UAC 2.0/3.0) or whatever activateDac negotiated for
+    // UAC 1.0 until the first track actually plays -- after that, ensureFormatActive keeps this
+    // in sync with whatever rate each track genuinely streams at, since different tracks can (and
+    // do) use different rates within the same DAC session. Purely for display (UsbControlState,
+    // the Settings screen) and the Capabilities probe before any track has played; actual
+    // playback never consults this, it uses each track's own real rate directly.
     @Volatile private var activeRateHz: Int = SUPPORTED_SAMPLE_RATE_HZ
 
     private var started = false
@@ -224,14 +228,103 @@ constructor(@ApplicationContext private val context: Context, private val usbSet
     // tracking -- observed as it jumping to nonsense values like -999999475 before stalling.
     // Caching a single instance per session, shared across both RoutingAudioSinks, means
     // whichever one actually gets used reports real progress to *both* callers.
-    @Volatile private var activeSink: UsbAudioSink? = null
+    @Volatile private var activeSink: AudioSink? = null
 
-    /** Returns an [AudioSink] wired to the active DAC session, or null if none is ready. */
+    /**
+     * Returns an [AudioSink] wired to the active DAC session, or null if none is ready -- or if
+     * [UsbSettings.bitPerfectMode] is off, or the device isn't [isBitPerfectCapable]. A device
+     * can be fully activated (Controls/Capabilities usable) without ever being used for actual
+     * playback: [RoutingAudioSink] falls back to normal Android audio output whenever this
+     * returns null, same mechanism as a genuinely absent/unplugged device, and it already
+     * re-checks this on every track (see its own liveness re-validation), so toggling bit-perfect
+     * mode takes effect on the very next [RoutingAudioSink.configure] call.
+     *
+     * Returns a plain [DefaultAudioSink] built with a [UsbAudioOutputProvider] rather than a
+     * hand-rolled `AudioSink` -- see [UsbAudioOutput]'s doc comment for why.
+     */
     fun createAudioSink(): AudioSink? {
+        if (!usbSettings.bitPerfectMode || !isBitPerfectCapable()) return null
         activeSink?.let { return it }
         val session = activeSession ?: return null
-        val format = activeFormat ?: return null
-        return UsbAudioSink(session, format).also { activeSink = it }
+        return DefaultAudioSink.Builder(context)
+            .setAudioOutputProvider(UsbAudioOutputProvider(this, session, usbSettings))
+            .build()
+            .also { activeSink = it }
+    }
+
+    /**
+     * Switches the DAC's active alt-setting to [format] if it isn't already, and records
+     * [sampleRateHz] as the real currently-active rate -- called by
+     * [UsbAudioOutputProvider.getAudioOutput] for every track, so a library mixing standard
+     * 16-bit tracks with 24-bit hi-res ones (or different sample rates) gets a device format
+     * that actually matches *each* track, rather than being stuck with a single bit depth for the
+     * whole session (either corrupting the other, byte-misaligned -- confirmed, reproduced as
+     * loud hissing -- or rejecting it outright).
+     *
+     * [activeRateHz]/[controlState]'s sample rate used to only ever get set once, by
+     * [activateDac] at startup -- harmless before this session's per-track dynamic format
+     * switching existed (every track genuinely did stream at the same rate activateDac picked),
+     * but once tracks could switch rate on their own, the Settings screen kept showing that
+     * stale startup rate forever after, even while actually playing something else entirely.
+     */
+    fun ensureFormatActive(format: UacStreamFormat, sampleRateHz: Int): Boolean {
+        val session = activeSession ?: return false
+        val formatChanged = format != activeFormat
+        var ok = true
+        if (formatChanged) {
+            // Same reasoning as the identical call in activateDac(): Android's own ALSA driver
+            // can race to re-claim the interface, and evicting it again right before
+            // selectFormat is safe/cheap insurance against that.
+            UsbAudioController.reassertKernelEviction(session)
+            ok = UsbAudioController.selectFormat(session, format)
+            if (ok) {
+                activeFormat = format
+                logEvent("Switched to ${format.bitResolution}-bit (alt=${format.alternateSetting}) for upcoming track")
+            } else {
+                logEvent("Failed to switch to ${format.bitResolution}-bit (alt=${format.alternateSetting}) for upcoming track")
+            }
+        }
+        if (formatChanged || sampleRateHz != activeRateHz) {
+            activeRateHz = sampleRateHz
+            refreshControlState(session, activeFormat ?: format, session.device.productName ?: session.device.deviceName)
+        }
+        return ok
+    }
+
+    /**
+     * Whether the active device is bit-perfect capable: its output Feature Unit was found *and*
+     * its volume range was successfully read back (confirming Auxio actually knows where unity
+     * gain is, rather than just assuming it) -- see [UsbControlState.volumeRange]. This is what
+     * gates whether the "Bit-perfect mode" toggle is interactable at all; false if nothing is
+     * active right now.
+     */
+    fun isBitPerfectCapable(): Boolean = controlState.value?.volumeRange != null
+
+    /**
+     * Reads the active session's Power Domain state right now (one of
+     * [UsbAudioController.PD_STATE_D0]/`D1`/`D2`), or null if there's no active session or this
+     * device's topology has no Power Domain at all (UAC 1.0/2.0, or a UAC 3.0 device that didn't
+     * declare one). A blocking USB control transfer, same as the other on-demand reads this class
+     * does in response to a UI query (e.g. [setMuted]'s read-back) -- fine for an occasional
+     * settings-screen refresh, not meant to be polled.
+     */
+    fun getPowerDomainState(): Int? {
+        val session = activeSession ?: return null
+        val powerDomainId = session.topology.powerDomainId
+        if (powerDomainId < 0) return null
+        return UsbAudioController.getPowerDomainState(session, powerDomainId)
+    }
+
+    /**
+     * Reads the active session's Clock Source frequency and valid/locked state right now, or
+     * null if there's no active session or this device has no Clock Source at all (UAC 1.0 --
+     * see [UacPlaybackTopology.clockSourceId]). Same blocking-read caveat as
+     * [getPowerDomainState].
+     */
+    fun getClockInfo(): Pair<Int?, Boolean?>? {
+        val session = activeSession ?: return null
+        if (session.topology.clockSourceId < 0) return null
+        return UsbAudioController.getClockFrequency(session) to UsbAudioController.getClockValid(session)
     }
 
     private fun activateDac(device: UsbDevice) {
@@ -281,10 +374,25 @@ constructor(@ApplicationContext private val context: Context, private val usbSet
             "Topology found: mixer=${found.mixerUnitId} featureUnit=${found.outputFeatureUnitId} " +
                 "clock=${found.clockSourceId}")
 
-        val session = UsbAudioController.activate(context, device, found)
+        var session = UsbAudioController.activate(context, device, found)
         if (session == null) {
             logEvent("Failed to activate UAC${found.uacVersion} session for ${device.deviceName}")
             return
+        }
+
+        // Query what sample rates the Clock Source actually supports before ever asking it to
+        // change rate -- UAC 1.0 has none, and this was never checked at all before: a real
+        // device accepted a SET_CUR to an unsupported rate and echoed it back as a successful
+        // readback while the real hardware clock silently stayed where it was (audibly: pitched
+        // up and sped up, every sample converted at the wrong rate despite 0 USB errors anywhere
+        // in the chain). See UsbAudioSession.clockSupportedRates and where
+        // UsbAudioOutputProvider consults it -- an empty result here (couldn't read, not
+        // "nothing supported") falls back to its old hardcoded guess rather than refusing every
+        // rate.
+        if (found.uacVersion != 1) {
+            val ranges = UsbAudioController.getClockFrequencyRanges(session) ?: emptyList()
+            session = session.copy(clockSupportedRates = ranges)
+            logEvent("Clock ${found.clockSourceId} supported rate ranges: $ranges")
         }
 
         // Do this before anything else: its recovery wait (up to 300ms for a D2->D0 wake, per
@@ -315,19 +423,23 @@ constructor(@ApplicationContext private val context: Context, private val usbSet
             }
         val muted = UsbAudioController.getMute(session)
         if (muted != false) UsbAudioController.setMute(session, muted = false)
+        // Was hardcoded 0..2 (master + stereo) -- the Feature Unit has one volume control per
+        // logical channel (1..N) plus the shared master (0), so a device with more than 2
+        // channels has per-channel controls beyond what that range ever touched. channelCount
+        // is read from the device's own Input Terminal descriptor, not assumed; only the loop
+        // bound was ever hardcoded to stereo.
+        //
         // Master channel (0) volume: we check master *mute* above, but had never checked
         // master *volume* -- if this Feature Unit has an independent master gain stage
         // separate from the per-channel ones below, it being low/attenuated would silence
-        // everything regardless of what channels 1/2 are set to.
-        for (channel in 0..2) {
+        // everything regardless of what the per-channel ones are set to.
+        for (channel in 0..found.channelCount.coerceAtLeast(2)) {
             val volume = UsbAudioController.getVolume(session, channel)
-            // 0 (1/256 dB) is 0dB/unity gain by the general UAC convention, but that's only
-            // ever been an assumption -- never actually checked against what this specific
-            // device itself reports as its real maximum via GET_RANGE. If its true max isn't
-            // 0 (firmware quirk, or a device that encodes gain rather than attenuation),
-            // writing 0 could be landing well short of audible.
+            // Deliberately the midpoint of the device's own reported range, not its max (unity
+            // gain) -- a freshly (re)activated DAC shouldn't jump straight to its loudest
+            // setting. See UsbAudioController.defaultVolumeTarget.
             val range = UsbAudioController.getVolumeRange(session, channel)
-            val target = range?.second ?: 0
+            val target = UsbAudioController.defaultVolumeTarget(range)
             if (volume == null || volume != target) {
                 UsbAudioController.setVolume(session, value = target, channel = channel)
             }
@@ -341,9 +453,12 @@ constructor(@ApplicationContext private val context: Context, private val usbSet
         // our input defaults to silence, independent of and upstream from everything above.
         val mixerUnitId = found.mixerUnitId
         val mixerBase = found.mixerInputChannelBase
+        // Was hardcoded to a stereo-in/stereo-out cross-point grid; both sides scale with the
+        // device's own real channel count instead (not assumed).
+        val mixerChannelCount = found.channelCount.coerceAtLeast(2)
         if (mixerUnitId >= 0 && mixerBase >= 0) {
-            for (inCh in mixerBase until mixerBase + 2) {
-                for (outCh in 1..2) {
+            for (inCh in mixerBase until mixerBase + mixerChannelCount) {
+                for (outCh in 1..mixerChannelCount) {
                     val gain = UsbAudioController.getMixerGain(session, mixerUnitId, inCh, outCh)
                     val gainRange = UsbAudioController.getMixerGainRange(session, mixerUnitId, inCh, outCh)
                     val gainTarget = gainRange?.second ?: 0
@@ -433,9 +548,14 @@ constructor(@ApplicationContext private val context: Context, private val usbSet
     private fun refreshControlState(session: UsbAudioSession, format: UacStreamFormat, deviceName: String) {
         val mixerUnitId = session.topology.mixerUnitId
         val mixerBase = session.topology.mixerInputChannelBase
+        // Was hardcoded to a stereo-in/stereo-out grid -- see activateDac's identical fix for why
+        // this scales with the device's own real channel count instead.
+        val mixerChannelCount = session.topology.channelCount.coerceAtLeast(2)
         val mixerChannels =
             if (mixerUnitId >= 0 && mixerBase >= 0) {
-                (mixerBase until mixerBase + 2).flatMap { inCh -> (1..2).map { outCh -> inCh to outCh } }
+                (mixerBase until mixerBase + mixerChannelCount).flatMap { inCh ->
+                    (1..mixerChannelCount).map { outCh -> inCh to outCh }
+                }
             } else {
                 emptyList()
             }
@@ -447,6 +567,17 @@ constructor(@ApplicationContext private val context: Context, private val usbSet
             mixerChannels.firstOrNull()?.let { (inCh, outCh) ->
                 UsbAudioController.getMixerGainRange(session, mixerUnitId, inCh, outCh)
             }
+        // Some devices (confirmed: FiiO Snowsky Tiny A) accept every SET_CUR volume write but
+        // always fail GET_CUR on readback (result=-1) -- a firmware limitation, not a transient
+        // error. Falling back to null here used to mean every single caller of [controlState]
+        // (this screen's volume slider, [MediaSessionHolder]'s physical-volume-key routing) saw
+        // "volume unknown" after *every* write on such a device, and both of them treat unknown
+        // as "assume max" -- so on a device like this, every write was immediately followed by
+        // every reader snapping back to full volume. Preserving the last known value (readback or
+        // our own just-applied write, whichever is freshest) instead means a GET_CUR failure
+        // looks like "nothing changed" rather than "reset to max", which is the correct read on a
+        // device that we just told to be at a specific value two lines above.
+        val volume = UsbAudioController.getVolume(session, 0) ?: _controlState.value?.volume
         _controlState.value =
             UsbControlState(
                 deviceName = deviceName,
@@ -454,11 +585,12 @@ constructor(@ApplicationContext private val context: Context, private val usbSet
                 activeFormat = format,
                 sampleRateHz = activeRateHz,
                 muted = UsbAudioController.getMute(session),
-                volume = UsbAudioController.getVolume(session, 0),
+                volume = volume,
                 volumeRange = UsbAudioController.getVolumeRange(session, 0),
                 mixerChannels = mixerChannels,
                 mixerGains = mixerGains,
-                mixerGainRange = mixerGainRange)
+                mixerGainRange = mixerGainRange,
+                clockSupportedRates = session.clockSupportedRates)
     }
 
     /** Live-adjusts the active session's mute state, if any; reflected in [controlState]. */
@@ -470,13 +602,65 @@ constructor(@ApplicationContext private val context: Context, private val usbSet
         refreshControlState(session, format, session.device.productName ?: session.device.deviceName)
     }
 
-    /** Live-adjusts the active session's master/channel volume, if any; reflected in [controlState]. */
+    // Dedicated to serializing [setVolume]'s own control transfers off whichever thread calls it
+    // (the physical volume keys dispatch through MediaSessionCompat's callback handler, i.e. the
+    // main thread) -- see [setVolume]'s doc comment for why this exists.
+    private val volumeExecutor =
+        Executors.newSingleThreadExecutor { r -> Thread(r, "UsbAudioControl-Volume").apply { isDaemon = true } }
+    @Volatile private var pendingVolumeDb: Int? = null
+    @Volatile private var volumeWriteInFlight = false
+
+    /**
+     * Live-adjusts the active session's master/channel volume, if any; reflected in
+     * [controlState]. Runs the actual control transfers (and the full post-write
+     * [refreshControlState] re-read) on a background thread and coalesces rapid successive calls
+     * down to just the latest target, rather than running each synchronously on the calling
+     * thread in turn.
+     *
+     * This specifically fixes a real, reported lag: holding the physical volume key fires a
+     * burst of calls here (one per key-repeat event) in quick succession on the main thread. Each
+     * one used to be a fully synchronous round trip -- 3 `SET_CUR` transfers plus
+     * [refreshControlState]'s own handful of `GET_CUR`/`GET_RANGE` reads -- so a burst of them
+     * queued up and had to drain serially, and the DAC's volume kept visibly climbing/falling for
+     * a noticeable while after the user had already stopped pressing. Since only the *final*
+     * target in a burst actually matters, [pendingVolumeDb] tracks just that, and
+     * [scheduleVolumeWrite] only starts a new round trip once the previous one has actually
+     * finished, skipping straight to whatever the latest requested value is instead of replaying
+     * every intermediate step.
+     */
     fun setVolume(valueDb: Int) {
+        pendingVolumeDb = valueDb
+        // Reflect the requested value immediately so callers (the volume key's system UI, the
+        // Settings screen slider) don't have to wait on the hardware round-trip just to show
+        // where the user asked the slider to go; refreshControlState below corrects this to the
+        // real read-back value once the write actually lands.
+        _controlState.value = _controlState.value?.copy(volume = valueDb)
+        // Persisted so the next activation (new session, app restart, DAC reconnect) starts from
+        // here instead of a fixed default -- see [UsbAudioOutput]'s constructor.
+        usbSettings.volumeDb = valueDb
+        scheduleVolumeWrite()
+    }
+
+    private fun scheduleVolumeWrite() {
+        if (volumeWriteInFlight) return
+        val target = pendingVolumeDb ?: return
         val session = activeSession ?: return
         val format = activeFormat ?: return
-        for (channel in 0..2) UsbAudioController.setVolume(session, valueDb, channel)
-        logEvent("User set volume=$valueDb")
-        refreshControlState(session, format, session.device.productName ?: session.device.deviceName)
+        volumeWriteInFlight = true
+        volumeExecutor.execute {
+            // Was hardcoded 0..2 (master + stereo) -- see activateDac's identical fix.
+            for (channel in 0..session.topology.channelCount.coerceAtLeast(2)) {
+                UsbAudioController.setVolume(session, target, channel)
+            }
+            logEvent("User set volume=$target")
+            refreshControlState(session, format, session.device.productName ?: session.device.deviceName)
+            volumeWriteInFlight = false
+            if (pendingVolumeDb != target) {
+                // Something more recent arrived while this write was in flight -- go straight to
+                // it instead of waiting for the next external setVolume call to notice.
+                scheduleVolumeWrite()
+            }
+        }
     }
 
     /** Live-adjusts one Mixer Unit (input, output) channel pair's gain, if the device has one. */

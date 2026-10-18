@@ -33,6 +33,19 @@ data class UsbAudioSession(
     val controlInterface: UsbInterface,
     /** Streaming interface alternate settings, keyed by bAlternateSetting. */
     val streamingAltSettings: Map<Int, UsbInterface>,
+    /**
+     * The Clock Source's actual supported sample rate sub-ranges in Hz (min..max pairs; a
+     * discrete rate is one where min == max), read once via [UsbAudioController.getClockFrequencyRanges]
+     * right after activation. Empty for UAC 1.0 (no Clock Source) or if the device didn't answer
+     * the query -- callers should fall back to a hardcoded guess in that case, not treat empty as
+     * "nothing supported." Declaring a rate here is no guarantee Auxio can actually request it
+     * (unrelated failures still possible), but NOT declaring one here and still requesting it
+     * anyway was confirmed, on a real device, to silently keep the hardware clock at its previous
+     * rate while the SET_CUR/GET_CUR control-register readback still reported the requested value
+     * -- a clean, error-free "success" the whole way down the USB stack while every sample was
+     * actually converted at the wrong rate (audibly: pitched up and sped up).
+     */
+    val clockSupportedRates: List<Pair<Int, Int>> = emptyList(),
 )
 
 /**
@@ -51,8 +64,15 @@ data class UsbAudioSession(
  * device: both were observed to sometimes complete (readback confirms the new rate, iso
  * transfers report zero errors) before the DAC's own clock/output stage has actually locked onto
  * it, producing clean, error-free, but silent transfers for however long it stays unlocked.
+ *
+ * Was 300ms; bumped after reproducing audible distortion at the very start of a track whose rate
+ * differs from the previous one (e.g. 44.1kHz <-> 96kHz) despite [UsbAudioController.getClockValid]
+ * reporting locked immediately (0 retries) every time -- consistent with this device's CLOCK_VALID
+ * control register not being a reliable signal of real analog PLL settling (same caveat already
+ * noted above: a clean, zero-error transfer doesn't guarantee the clock has actually locked), so a
+ * bigger fixed margin is the only lever available for it specifically.
  */
-const val DAC_SETTLE_DELAY_MS = 300L
+const val DAC_SETTLE_DELAY_MS = 600L
 
 object UsbAudioController {
     private const val REQ_TYPE_CLASS_INTERFACE_GET = 0xA1 // Device-to-host, Class, Interface
@@ -63,6 +83,9 @@ object UsbAudioController {
     // carried purely by bmRequestType's direction bit.
     private const val UAC_REQUEST_CUR = 0x01
     private const val UAC_REQUEST_RANGE = 0x02
+    // Plenty for any real device -- sized to bound the GET_RANGE clock-frequency read buffer
+    // (2 header bytes + this many 12-byte dMIN/dMAX/dRES sub-ranges), not a protocol limit.
+    private const val MAX_CLOCK_SUBRANGES = 16
     // UAC 1.0 predates that unification: GET/SET is baked into bRequest itself (confirmed
     // against the Linux kernel's UAC_SET_CUR/UAC_GET_CUR in include/linux/usb/audio.h), so a
     // GET on a UAC 1.0 device needs bRequest=0x81, not the 0x01 that would mean SET_CUR.
@@ -211,6 +234,42 @@ object UsbAudioController {
                 ((buffer[3].toInt() and 0xFF) shl 24)
         L.i("Clock ${session.topology.clockSourceId} current frequency: $hz Hz")
         return hz
+    }
+
+    /**
+     * Reads the clock source's actual supported sample rate sub-ranges via the UAC 2.0/3.0 RANGE
+     * request (each a dMIN/dMAX/dRES triple per the spec; only MIN/MAX are kept since membership
+     * testing is all this is used for), or null on failure. This was never queried anywhere in
+     * this codebase before -- [setClockFrequency] was always just trusted blindly on the strength
+     * of its own SET_CUR+readback succeeding, which a real device demonstrated is not actually
+     * proof the rate took effect (see [UsbAudioSession.clockSupportedRates]). Safe/read-only, same
+     * as [getClockFrequency].
+     */
+    fun getClockFrequencyRanges(session: UsbAudioSession): List<Pair<Int, Int>>? {
+        val buffer = ByteArray(2 + MAX_CLOCK_SUBRANGES * 12)
+        val wValue = CS_SAM_FREQ_CONTROL shl 8
+        val wIndex = (session.topology.clockSourceId shl 8) or session.controlInterface.id
+        val result =
+            session.connection.controlTransfer(
+                REQ_TYPE_CLASS_INTERFACE_GET, UAC_REQUEST_RANGE, wValue, wIndex, buffer, buffer.size, 1000)
+        if (result < 2) {
+            L.w("GET_RANGE clock frequency failed: result=$result (wValue=$wValue wIndex=$wIndex)")
+            return null
+        }
+        val numSubRanges = (buffer[0].toInt() and 0xFF) or ((buffer[1].toInt() and 0xFF) shl 8)
+        fun u32(offset: Int) =
+            (buffer[offset].toInt() and 0xFF) or
+                ((buffer[offset + 1].toInt() and 0xFF) shl 8) or
+                ((buffer[offset + 2].toInt() and 0xFF) shl 16) or
+                ((buffer[offset + 3].toInt() and 0xFF) shl 24)
+        val ranges = mutableListOf<Pair<Int, Int>>()
+        for (i in 0 until numSubRanges) {
+            val base = 2 + i * 12
+            if (base + 12 > result) break // device declared more sub-ranges than it sent back
+            ranges.add(u32(base) to u32(base + 4))
+        }
+        L.i("Clock ${session.topology.clockSourceId} supported rate ranges: $ranges")
+        return ranges
     }
 
     /**
@@ -406,6 +465,14 @@ object UsbAudioController {
         L.i("Volume range (unit=$unitId ch=$channel): numSubRanges=$numSubRanges min=$min max=$max")
         return min to max
     }
+
+    /**
+     * The default volume target to request on activation/reconfigure: the midpoint of [range]
+     * rather than its max (unity gain) -- a deliberate safety margin so a freshly (re)activated
+     * DAC doesn't jump straight to its loudest setting. Falls back to 0 (unity, the prior
+     * default) if [range] couldn't be read.
+     */
+    fun defaultVolumeTarget(range: Pair<Int, Int>?): Int = range?.let { (it.first + it.second) / 2 } ?: 0
 
     /** Sets the Feature Unit's volume for [channel] (0=master, 1=left, 2=right), in 1/256 dB. */
     fun setVolume(session: UsbAudioSession, value: Int, channel: Int): Boolean {
