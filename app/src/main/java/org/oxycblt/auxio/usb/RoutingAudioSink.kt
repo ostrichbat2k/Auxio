@@ -20,6 +20,7 @@ package org.oxycblt.auxio.usb
 
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.AuxEffectInfo
+import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.exoplayer.audio.AudioSink
@@ -69,53 +70,183 @@ class RoutingAudioSink(private val usbAudioManager: UsbAudioManager, private val
     AudioSink {
     private var delegate: AudioSink? = null
     private var pendingListener: AudioSink.Listener? = null
+    // Whether ExoPlayer currently considers this sink "playing" -- set by play()/pause(), the
+    // only two calls it makes to tell us that. Needed because ExoPlayer calls play() once per
+    // play *intent*, not again every time configure() causes this class to internally swap which
+    // delegate it's forwarding to for a new track -- it has no idea that happened at all, since
+    // it only ever sees this outer RoutingAudioSink. Confirmed, reproduced: a track transition
+    // that switched delegates while already playing (no real pause()/play() pair from
+    // ExoPlayer's side, just an ordinary queue advance) left the newly-constructed
+    // UsbAudioOutput sitting in its default paused=true state forever -- its native thread ran
+    // and kept submitting (silent) URBs just fine, so nothing in the USB layer ever looked
+    // broken, but position never advanced (paused output deliberately doesn't advance
+    // UsbAudioOutput.framesOutput -- see its own doc comment), eventually tripping Media3's
+    // StuckPlayerDetector after 10s of no progress and skipping the track via onPlayerError.
+    @Volatile private var isPlaying = false
 
     /** Whatever's already been decided, defaulting to [fallback] without caching that default. */
     private fun current(): AudioSink = delegate ?: fallback
 
-    private fun peek(): AudioSink = delegate ?: usbAudioManager.createAudioSink() ?: fallback
+    // A live USB session doesn't mean this *specific* format can actually go out over it -- e.g.
+    // a device whose Clock Source only declares 44100/48000 can't take a 96kHz track at all.
+    // Must check per-format, not just session liveness, or every track gets stuck on whichever
+    // delegate createAudioSink() handed back regardless of whether it can actually play it.
+    private fun AudioSink.reallySupports(format: Format): Boolean =
+        getFormatSupport(format) != AudioSink.SINK_FORMAT_UNSUPPORTED
 
-    private fun resolveForConfigure(): AudioSink {
+    private fun resolveForConfigure(format: Format): AudioSink {
         val existing = delegate
         val liveUsbSink = usbAudioManager.createAudioSink()
-        if (existing != null && existing !== fallback && existing === liveUsbSink) {
-            // Already upgraded to USB, and that session is still the one UsbAudioManager
-            // considers live -- never go back down to fallback on our own initiative.
-            return existing
-        }
-        // Either never upgraded, or `existing` is a USB sink whose session has since died
-        // (device unplugged mid-stream: UsbAudioManager.deactivateDac() cleared activeSink,
-        // so createAudioSink() now returns null or a *different* instance for a newly
-        // activated device). Continuing to use a dead session's sink was observed spinning
-        // configure() into a permanent error loop -- every call failing identically with no
-        // way out, since nothing else here ever re-checks liveness once "upgraded". Falling
-        // through here re-resolves against what's actually live right now, same as a fresh
-        // player would.
-        val chosen = liveUsbSink ?: fallback
+        val chosen =
+            if (existing != null &&
+                existing !== fallback &&
+                existing === liveUsbSink &&
+                existing.reallySupports(format)) {
+                // Already upgraded to USB, that session is still the one UsbAudioManager
+                // considers live, and it can actually play this track's format -- never go back
+                // down to fallback on our own initiative.
+                existing
+            } else {
+                // Either never upgraded, `existing` is a USB sink whose session has since died
+                // (device unplugged mid-stream: UsbAudioManager.deactivateDac() cleared
+                // activeSink, so createAudioSink() now returns null or a *different* instance for
+                // a newly activated device), or the live session just can't take this specific
+                // format (e.g. a 96kHz track against a 44.1/48kHz-only device) -- route that one
+                // track to fallback without treating it as a session death, so the next
+                // configure() (next track) gets a fresh look instead of being stuck on either
+                // delegate for a reason that no longer applies. Continuing to use a dead
+                // session's sink was observed spinning configure() into a permanent error loop --
+                // every call failing identically with no way out, since nothing else here ever
+                // re-checks liveness once "upgraded". Falling through here re-resolves against
+                // what's actually live and actually usable right now, same as a fresh player
+                // would.
+                liveUsbSink?.takeIf { it.reallySupports(format) } ?: fallback
+            }
         if (chosen !== existing) {
+            if (existing != null && existing !== fallback) {
+                // Abandoning a live USB delegate -- without this, its UsbAudioOutput keeps its
+                // native thread running and the USB interface claimed forever, since nothing
+                // else here ever calls pause()/release() on a delegate this class has simply
+                // stopped forwarding calls to. pause() is exactly the hook that already hands
+                // the claim back to Android after a grace period (see UsbAudioOutput.pause()),
+                // so reusing it here (rather than a one-off release-only path) is deliberate --
+                // the same session's cached USB sink can come right back for a later compatible
+                // track, same as resuming from a real user pause.
+                existing.pause()
+            }
             pendingListener?.let(chosen::setListener)
+            // A real hand-off is happening (not just re-confirming the same delegate) -- let the
+            // Now Playing screen show that something's in progress rather than looking frozen
+            // while configure() below does its (possibly slow: reclaim + clock relock) work.
+            usbAudioManager.reportPlaybackRoute(UsbAudioManager.PlaybackRoute.Switching)
+        }
+        if (chosen === fallback) {
+            // Force this synchronously, right here, rather than trusting that some earlier
+            // release already landed -- Android's AudioPolicyManager picks an AudioTrack's
+            // output device essentially instantly when fallback.configure() below opens it, and
+            // never revisits that choice later. A background release that lands even ~30ms after
+            // that point is already too late -- the track is stuck on the speaker for its entire
+            // lifetime, having missed its one chance to see the DAC as an available route. This
+            // call is cheap and idempotent (a no-op if already released), so paying it on every
+            // fallback configure() is fine. awaitAndroidTakeover blocks (briefly, bounded) until
+            // Android's own device list actually reports the USB device as available -- the
+            // kernel-side decision is synchronous (see UsbAudioController.releaseToKernel's doc
+            // comment) but Android's own userspace recognition of it still has real latency.
+            usbAudioManager.releaseClaim(delayMs = 0, awaitAndroidTakeover = true)
         }
         delegate = chosen
         return chosen
     }
+
+    private fun bitDepthFor(pcmEncoding: Int): Int? =
+        when (pcmEncoding) {
+            C.ENCODING_PCM_16BIT -> 16
+            C.ENCODING_PCM_24BIT -> 24
+            C.ENCODING_PCM_32BIT -> 32
+            // Covers C.ENCODING_PCM_FLOAT (the not-yet-finished 24-bit-via-float path) and
+            // anything else -- no real device bit depth to report yet in that case.
+            else -> null
+        }
+
+    /**
+     * What's actually audible for a fallback track: HAL's own fixed shared-mixer rate (see
+     * [UsbAudioManager.halOutputSampleRate]), in stereo (the mixer's own fixed channel count,
+     * independent of the file's own channel count) -- not the file's own decoded format, which
+     * [PlaybackRoute.Fallback]'s doc comment explains isn't what's actually playing. No single
+     * real bit depth to report here either (HAL's internal mixing format isn't one fixed,
+     * confidently-knowable value the way [PlaybackRoute.Direct]'s raw path is), hence null.
+     */
+    private fun fallbackRoute(): UsbAudioManager.PlaybackRoute.Fallback =
+        UsbAudioManager.PlaybackRoute.Fallback(
+            bitDepth = null, sampleRateHz = usbAudioManager.halOutputSampleRate(), channels = 2)
 
     override fun setListener(listener: AudioSink.Listener) {
         pendingListener = listener
         delegate?.setListener(listener)
     }
 
-    override fun supportsFormat(format: Format): Boolean = peek().supportsFormat(format)
+    // Same per-format reasoning as resolveForConfigure: a live USB sink reporting a format
+    // unsupported must fall through to asking fallback, not be taken as "unsupported, period" --
+    // otherwise the renderer sees no sink anywhere that can play e.g. a 96kHz track against a
+    // 44.1/48kHz-only DAC, and the track produces no output at all instead of routing to the
+    // normal Android audio path.
+    override fun supportsFormat(format: Format): Boolean {
+        val usbSink = usbAudioManager.createAudioSink()
+        return (usbSink != null && usbSink.reallySupports(format)) || fallback.supportsFormat(format)
+    }
 
-    override fun getFormatSupport(format: Format): Int = peek().getFormatSupport(format)
+    override fun getFormatSupport(format: Format): Int {
+        val usbSink = usbAudioManager.createAudioSink()
+        val usbSupport = usbSink?.getFormatSupport(format)
+        return if (usbSupport != null && usbSupport != AudioSink.SINK_FORMAT_UNSUPPORTED) {
+            usbSupport
+        } else {
+            fallback.getFormatSupport(format)
+        }
+    }
 
     override fun getCurrentPositionUs(sourceEnded: Boolean): Long = current().getCurrentPositionUs(sourceEnded)
 
     @Deprecated("Deprecated in AudioSink interface itself; this is still the signature callers use.")
     override fun configure(inputFormat: Format, specifiedBufferSize: Int, outputChannels: IntArray?) {
-        resolveForConfigure().configure(inputFormat, specifiedBufferSize, outputChannels)
+        val previousDelegate = delegate
+        val chosen = resolveForConfigure(inputFormat)
+        try {
+            chosen.configure(inputFormat, specifiedBufferSize, outputChannels)
+        } catch (e: Exception) {
+            // Whatever configure() was trying to do (claim the interface, lock the clock) didn't
+            // pan out -- don't leave the Now Playing screen stuck on "Switching" forever.
+            usbAudioManager.reportPlaybackRoute(fallbackRoute())
+            throw e
+        }
+        // ExoPlayer only calls play() on *this* outer sink once per play intent -- it never
+        // learns that resolveForConfigure() just switched which delegate we forward to for this
+        // new track, so if we're already supposed to be playing, the new delegate needs an
+        // explicit nudge or it just sits in its own default-paused state forever. See
+        // isPlaying's doc comment for the concrete failure this fixes.
+        if (chosen !== previousDelegate && isPlaying) {
+            chosen.play()
+        }
+        // Reported fresh on every real configure() call, not just when resolveForConfigure()
+        // decided to switch delegates -- back-to-back tracks on the same (already-settled)
+        // delegate never hit that branch, which would otherwise leave this stuck on whatever was
+        // reported for the *previous* format decision (e.g. still Fallback after a 96kHz track if
+        // the very next track is a 44.1kHz one the device supports fine).
+        usbAudioManager.reportPlaybackRoute(
+            if (chosen === fallback) {
+                fallbackRoute()
+            } else {
+                UsbAudioManager.PlaybackRoute.Direct(
+                    bitDepth = bitDepthFor(inputFormat.pcmEncoding),
+                    sampleRateHz = inputFormat.sampleRate,
+                    channels = inputFormat.channelCount)
+            })
     }
 
-    override fun play() = current().play()
+    override fun play() {
+        isPlaying = true
+        current().play()
+    }
 
     override fun handleDiscontinuity() = current().handleDiscontinuity()
 
@@ -157,11 +288,15 @@ class RoutingAudioSink(private val usbAudioManager: UsbAudioManager, private val
 
     override fun setVolume(volume: Float) = current().setVolume(volume)
 
-    override fun pause() = current().pause()
+    override fun pause() {
+        isPlaying = false
+        current().pause()
+    }
 
     override fun flush() = current().flush()
 
     override fun reset() {
+        isPlaying = false
         // Let the next configure() re-evaluate USB availability (e.g. a DAC plugged in or
         // unplugged since the last track) rather than sticking with whatever was chosen before.
         delegate?.reset()
@@ -169,6 +304,7 @@ class RoutingAudioSink(private val usbAudioManager: UsbAudioManager, private val
     }
 
     override fun release() {
+        isPlaying = false
         delegate?.release()
         delegate = null
     }

@@ -35,6 +35,7 @@ import androidx.dynamicanimation.animation.SpringForce
 import androidx.fragment.app.activityViewModels
 import androidx.fragment.app.viewModels
 import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
 import kotlin.math.abs
 import org.oxycblt.auxio.R
 import org.oxycblt.auxio.databinding.FragmentPlaybackPanelBinding
@@ -51,6 +52,8 @@ import org.oxycblt.auxio.playback.ui.swiper.CarouselTransformer
 import org.oxycblt.auxio.playback.ui.swiper.CoverPagerAdapter
 import org.oxycblt.auxio.playback.ui.swiper.UserAwarePagerCallback
 import org.oxycblt.auxio.ui.ViewBindingFragment
+import org.oxycblt.auxio.usb.UsbAudioManager
+import org.oxycblt.auxio.usb.UsbControlState
 import org.oxycblt.auxio.util.collectImmediately
 import org.oxycblt.auxio.util.dampen
 import org.oxycblt.auxio.util.recycler
@@ -75,6 +78,7 @@ class PlaybackPanelFragment :
     Toolbar.OnMenuItemClickListener,
     StyledSeekBar.Listener,
     StepperOverlay.Listener {
+    @Inject lateinit var usbAudioManager: UsbAudioManager
     private val coverPagerAdapter = CoverPagerAdapter(this)
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val detailModel: DetailViewModel by activityViewModels()
@@ -181,6 +185,7 @@ class PlaybackPanelFragment :
         collectImmediately(playbackModel.isPlaying, ::updatePlaying)
         collectImmediately(playbackModel.isShuffled, ::updateShuffled)
         collectImmediately(playbackModel.pagerQueue, ::updatePager)
+        collectImmediately(usbAudioManager.playbackRoute, usbAudioManager.controlState, ::updateUsbStatus)
     }
 
     // FIXME: Old code!! Maybe not necessary anymore?
@@ -277,6 +282,39 @@ class PlaybackPanelFragment :
         val context = requireContext()
         binding.playbackToolbar.subtitle =
             parent?.run { name.resolve(context) } ?: context.getString(R.string.lbl_all_songs)
+    }
+
+    /**
+     * Shows exactly what [org.oxycblt.auxio.usb.RoutingAudioSink] is doing with the current
+     * track, including its real decoded format either way -- hidden entirely when there's no DAC
+     * session at all ([controlState] null -- feature off, nothing plugged in) so this stays
+     * invisible to anyone not using the feature. Shown for [UsbAudioManager.PlaybackRoute
+     * .Fallback] too, not just [UsbAudioManager.PlaybackRoute.Direct], *while a session is live*,
+     * since that specifically means bit-perfect mode is on but this one track couldn't use it
+     * (e.g. an unsupported sample rate) -- the whole reason this exists is to make that silent,
+     * per-track fallback visible instead of looking like nothing happened.
+     */
+    private fun updateUsbStatus(route: UsbAudioManager.PlaybackRoute, controlState: UsbControlState?) {
+        val statusView = requireBinding().playbackUsbStatus
+        if (controlState == null) {
+            statusView.visibility = View.GONE
+            return
+        }
+        statusView.visibility = View.VISIBLE
+        statusView.text =
+            when (route) {
+                is UsbAudioManager.PlaybackRoute.Direct -> "USB DAC · ${formatLabel(route.bitDepth, route.sampleRateHz, route.channels)}"
+                is UsbAudioManager.PlaybackRoute.Fallback -> "HAL · ${formatLabel(route.bitDepth, route.sampleRateHz, route.channels)}"
+                UsbAudioManager.PlaybackRoute.Switching -> "Switching audio output…"
+            }
+    }
+
+    private fun formatLabel(bitDepth: Int?, sampleRateHz: Int, channels: Int): String {
+        val bits = bitDepth?.let { "$it-bit" } ?: "PCM"
+        val khz = sampleRateHz / 1000f
+        val rate = if (khz == khz.toInt().toFloat()) "${khz.toInt()}" else "$khz"
+        val chLabel = if (channels == 2) "" else " · ${channels}ch"
+        return "$bits/${rate}kHz$chLabel"
     }
 
     private fun updatePosition(positionDs: Long) {

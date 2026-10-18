@@ -683,6 +683,21 @@ class ExoPlaybackStateHolder(
                 // checking this early loses the race more often than not. Each renderer gets its
                 // own wrapper; only one is ever active for a given track, so only one actually
                 // opens the USB stream.
+                // Tried listing MediaCodecAudioRenderer first (ahead of FfmpegAudioRenderer) to
+                // get real higher-bit-depth PCM for high-res FLAC, since Media3's own FFmpeg
+                // decoder extension has a confirmed, current (checked against the live upstream
+                // androidx/media repo, not just this project's vendored copy) hard limitation:
+                // FfmpegAudioDecoder only ever outputs 16-bit integer or 32-bit float PCM, never
+                // a source's real higher bit depth. Reverted: this made ExoPlayer's
+                // MediaCodecRenderer decide every FLAC track could skip decoding entirely via its
+                // "bypass" path (treating the still-compressed container format as something our
+                // sink could accept directly, which it never legitimately can for FLAC) --
+                // reproduced, crashed every single track with a NegativeArraySizeException in
+                // PcmRingBuffer's size calculation, compounding into the pre-existing
+                // onPlayerError unconditional-retry-next-track loop (unplayable library). Getting
+                // real 24-bit decode via the platform codec needs a more careful, narrower
+                // investigation of why MediaCodecRenderer chose bypass here at all, not just a
+                // priority swap -- left as a known follow-up, not attempted again without that.
                 arrayOf<BaseRenderer>(
                     FfmpegAudioRenderer(
                         handler,

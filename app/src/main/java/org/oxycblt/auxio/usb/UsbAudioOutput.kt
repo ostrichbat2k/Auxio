@@ -58,6 +58,15 @@ class UsbAudioOutput(
     private val channels: Int,
     private val sampleRateHz: Int,
     private val initialVolumeDb: Int?,
+    // True when UsbAudioOutputProvider picked this device format as a *conversion target* for
+    // 32-bit float PCM (FfmpegAudioRenderer's only way to get real higher-than-16-bit precision
+    // out of a device whose own Feature Unit works in integer, not float) rather than ExoPlayer
+    // already producing this format's own native encoding directly. write() branches on this.
+    private val isFloatInput: Boolean = false,
+    // So pause()/play() can hand the raw interface back to Android's own USB-audio HAL whenever
+    // this instance genuinely stops being used, and reclaim it when actually needed again --
+    // see activateAndStream()/pause()'s doc comments.
+    private val usbAudioManager: UsbAudioManager,
 ) : AudioOutput {
 
     private companion object {
@@ -85,6 +94,9 @@ class UsbAudioOutput(
     private val bytesPerFrame = channels * format.subslotSize
     private var ringBuffer = PcmRingBuffer(bytesPerFrame * sampleRateHz * RING_BUFFER_MS / 1000)
     private var framesWritten = 0L
+    // Only used when isFloatInput -- reused across write() calls the same way UsbAudioOutput's
+    // own URB buffers are, to avoid allocating on every single call.
+    private var floatConversionBuffer = ByteArray(0)
     // Frames actually handed to the device via a paced, submitted URB -- i.e. audibly played,
     // not just sitting in [ringBuffer]. [getPositionUs] MUST report this, not [framesWritten]:
     // DefaultAudioSink.hasAudioOutputPendingData() compares its own written-frame count against
@@ -121,8 +133,61 @@ class UsbAudioOutput(
     // correctly considering itself paused the whole time. The Now Playing UI was actually correct
     // (frozen, showing paused) -- the DAC was what was wrong, playing anyway.
     @Volatile private var paused = true
+    // Whether this instance currently holds the USB claim and has a live native stream running.
+    // False right after pause() hands the interface back to Android (see pause()'s doc comment);
+    // play() re-runs activateAndStream() from scratch when it finds this false, since the clock/
+    // mute state can't be assumed to have survived however long Android (or another app) had the
+    // device in the meantime.
+    @Volatile private var activated = false
 
     init {
+        if (!activateAndStream()) {
+            throw AudioOutputProvider.InitializationException()
+        }
+    }
+
+    /**
+     * Claims the interface, negotiates the clock, and starts the native streaming thread --
+     * everything needed to go from "not currently using the DAC" to "audibly streaming to it".
+     * Run once at construction (see [init]), and again from [play] whenever [pause] has released
+     * the claim back to Android in the meantime, since the hardware clock/mute state can't be
+     * assumed to have survived that -- another app (or Android's own UsbAlsaManager) may well
+     * have used the device for something else entirely while we didn't hold it.
+     *
+     * Returns false on failure instead of throwing, unlike the exception [init] turns a false
+     * return into -- a failure here while resuming from [pause] shouldn't crash playback, it
+     * should just leave this instance non-functional; [isStalled] has a dedicated check for
+     * exactly that so [androidx.media3.exoplayer.audio.DefaultAudioSink]'s own stall-recovery
+     * eventually notices and flushes, same as any other genuine stall.
+     */
+    private fun activateAndStream(): Boolean {
+        if (!usbAudioManager.requestClaim()) {
+            L.w("UsbAudioOutput: could not claim USB interface for streaming")
+            return false
+        }
+
+        // requestClaim() only re-claims the control interface and the streaming interface's
+        // alt-0 -- NOT necessarily this instance's actual target alt-setting. Calling this here
+        // unconditionally (not just relying on UsbAudioOutputProvider.getAudioOutput() having
+        // already called it moments ago, which doesn't happen at all on a pause()-then-play()
+        // resume of this *same* instance -- DefaultAudioSink never decides the format "changed"
+        // for that, so getAudioOutput() never runs again) guarantees the device is really on
+        // [format]'s alt-setting before opening the iso stream below.
+        if (!usbAudioManager.ensureFormatActive(format, sampleRateHz)) {
+            L.w("UsbAudioOutput: failed to select alt-setting for ${format.bitResolution}-bit")
+            return false
+        }
+
+        // Mute before touching the clock at all, not after -- a clock-frequency change makes the
+        // DAC chip's PLL re-lock to a new rate, and many real DACs produce an audible transient
+        // (a "thunk"/pop, the same reason higher-end gear often has an audible relay click on a
+        // rate change: it's muting output for exactly this reason) while that happens. The old
+        // code only ever checked/corrected mute state *after* the clock change, at the single
+        // worst possible time for that check to matter -- it could confirm the device was
+        // unmuted, but only after any relock transient had already played out audibly. Left
+        // muted until right before startStreamingThread(), once the clock is confirmed locked.
+        UsbAudioController.setMute(session, muted = true)
+
         // UAC 1.0 has no Clock Source entity -- its rate lives on the streaming endpoint itself
         // (see UsbAudioManager.activateDac's comment on the same split). Using
         // setClockFrequency unconditionally here was the actual cause of a real, reproduced
@@ -136,7 +201,7 @@ class UsbAudioOutput(
             }
         if (!clockOk) {
             L.w("UsbAudioOutput: failed to set DAC clock to $sampleRateHz Hz")
-            throw AudioOutputProvider.InitializationException()
+            return false
         }
 
         // See UsbAudioManager.activateDac's comment on wakePowerDomain for why: a clean,
@@ -153,16 +218,21 @@ class UsbAudioOutput(
                 session.topology.powerDomainD2RecoveryUs)
         }
 
-        // Re-check mute/volume after every clock change: unknown whether reconfiguring the
-        // clock resets the Feature Unit's state on this hardware, but it's cheap to confirm and
-        // the first real-playback attempt at this point transferred perfectly (0 USB errors)
-        // while producing no audible output, which points at exactly this.
-        val muted = UsbAudioController.getMute(session)
-        L.i("UsbAudioOutput: post-clock-change mute=$muted")
-        if (muted != false) {
-            UsbAudioController.setMute(session, muted = false)
-        }
-        for (channel in 1..channels) {
+        // Re-apply volume after every clock change: unknown whether reconfiguring the clock
+        // resets the Feature Unit's volume state on this hardware, but it's cheap to confirm.
+        // Mute itself is deliberately left alone here -- see the setMute(true) call above and
+        // the matching setMute(false) right before startStreamingThread() below.
+        //
+        // Starts at 0 (master), not 1 -- this used to skip the master channel entirely, which
+        // was harmless as long as nothing else ever touched it independently of a live
+        // UsbAudioManager.setVolume() call (which always included it, via its own 0..channels
+        // loop). That stopped being true once UsbAudioController.setUnityVolume() started
+        // forcing *every* channel, master included, to unity gain before releasing to HAL (see
+        // its doc comment) -- without restoring master here too, it stayed stuck at unity after
+        // every HAL->DAC switch, which UsbVolumeProvider.applyRange() then read back as "the
+        // current volume", computing every subsequent adjustment from a wrong (maxed) baseline.
+        // Confirmed, reproduced: "switch to DAC, press volume down once, volume jumps to max".
+        for (channel in 0..channels) {
             val volume = UsbAudioController.getVolume(session, channel)
             // Prefer the user's last explicitly-set volume (persisted in UsbSettings, see
             // UsbAudioManager.setVolume) over a fixed default -- otherwise every activation
@@ -208,12 +278,32 @@ class UsbAudioOutput(
             L.i("UsbAudioOutput: clock valid at ${sampleRateHz}Hz after $attempt extra wait(s): $valid")
         }
 
+        // Only unmute now that the clock is confirmed (or assumed, if unreadable) locked -- see
+        // the setMute(true) call above for why this has to bracket the whole relock sequence
+        // rather than just being corrected once, after the fact.
+        UsbAudioController.setMute(session, muted = false)
+
         startStreamingThread()
+        activated = true
+        // Tells UsbAudioManager's Settings-screen mutators (setMuted/setVolume/setMixerGain)
+        // not to release the claim out from under this still-running stream just because their
+        // own one-off control write finished -- see notifyStreamingStarted's doc comment.
+        usbAudioManager.notifyStreamingStarted()
+        return true
     }
 
     override fun play() {
         L.i("UsbAudioOutput: play()")
         paused = false
+        if (!activated) {
+            // pause() released the claim (or activateAndStream() failed outright last time) --
+            // redo the whole clock/mute dance from scratch rather than just restarting the
+            // thread, since the hardware clock/mute state can't be assumed to have survived
+            // however long we didn't hold the interface.
+            if (!activateAndStream()) {
+                L.w("UsbAudioOutput: failed to resume streaming -- isStalled() will reflect this")
+            }
+        }
     }
 
     override fun pause() {
@@ -221,6 +311,16 @@ class UsbAudioOutput(
         // audio out over up to RING_BUFFER_MS.
         L.i("UsbAudioOutput: pause()")
         paused = true
+        if (activated) {
+            stopStreamingThread()
+            activated = false
+            usbAudioManager.notifyStreamingStopped()
+            // Hand the interface back to Android after a short grace period (see
+            // UsbAudioManager.releaseClaim's doc comment) rather than immediately -- a quick
+            // pause/resume shouldn't pay the real hand-off cost, but genuinely leaving playback
+            // paused should free the device for every other app.
+            usbAudioManager.releaseClaim()
+        }
     }
 
     override fun write(buffer: ByteBuffer, encodedAccessUnitCount: Int, presentationTimeUs: Long): Boolean {
@@ -242,6 +342,14 @@ class UsbAudioOutput(
 
     override fun release() {
         stopStreamingThread()
+        if (activated) {
+            activated = false
+            usbAudioManager.notifyStreamingStopped()
+            // The player is genuinely done with this instance -- release immediately rather
+            // than waiting out the usual grace period, which exists only to absorb a quick
+            // pause/resume that this is specifically not.
+            usbAudioManager.releaseClaim(delayMs = 0)
+        }
     }
 
     override fun setVolume(volume: Float) {
@@ -285,6 +393,10 @@ class UsbAudioOutput(
      * back short of the user manually skipping the track.
      */
     override fun isStalled(): Boolean {
+        // Not paused, but activateAndStream() never got the claim/clock lock back after the last
+        // pause() released it -- nothing will ever make lastUrbSubmittedAtMs move on its own in
+        // this state (streaming itself is false), so the check below alone would never catch it.
+        if (!paused && !activated) return true
         return streaming && (System.currentTimeMillis() - lastUrbSubmittedAtMs) > STALL_THRESHOLD_MS
     }
 

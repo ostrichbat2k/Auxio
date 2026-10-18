@@ -92,6 +92,10 @@ object UsbAudioController {
     private const val UAC1_REQUEST_GET_CUR = 0x81
     private const val CS_SAM_FREQ_CONTROL = 0x01
     private const val CS_CLOCK_VALID_CONTROL = 0x02
+    // UAC3 request for a High Capability Descriptor -- unlike CUR/RANGE, wValue here is the
+    // descriptor/cluster ID directly (not a (control<<8) selector), confirmed against the Linux
+    // kernel's get_cluster_channels_v3() in sound/usb/mixer.c.
+    private const val UAC3_CS_REQ_HIGH_CAPABILITY_DESCRIPTOR = 0x06
     private const val FU_MUTE_CONTROL = 0x01
     private const val FU_VOLUME_CONTROL = 0x02
     private const val AC_POWER_DOMAIN_CONTROL = 0x02
@@ -207,6 +211,63 @@ object UsbAudioController {
         L.i("Re-evicted $disconnected/${defaultConfig.interfaceCount} interfaces before streaming")
     }
 
+    /**
+     * Gives both interfaces back to the kernel so Android's own snd-usb-audio can register a
+     * normal playback PCM substream for this device -- order matters and is the entire point of
+     * this function existing separately from just calling `releaseInterface` twice in whatever
+     * order.
+     *
+     * Read directly from the kernel source (`sound/usb/card.c`): only the *control* interface's
+     * own probe ever calls `snd_usb_create_streams()`, which walks its interface-association
+     * descriptor's interface list (control + streaming) and calls `snd_usb_create_stream()` for
+     * each one. The streaming interface's own probe can never create its own PCM substream --
+     * self-referencing `snd_usb_create_streams()` on it fails immediately ("Audio class v2/v3
+     * interfaces need an interface association"), since the IAD descriptor only lives on the
+     * control interface. `snd_usb_create_stream()` skips an interface outright
+     * (`usb_interface_claimed(iface)`, i.e. `iface->dev.driver != NULL` -- see
+     * `include/linux/usb.h` -- true for *our own* usbfs claim just as much as a real kernel
+     * driver) with no retry later. And `USBDEVFS_CONNECT`'s `device_attach()` call -- what
+     * `UsbDeviceConnection.releaseInterface()` issues internally on success, confirmed from AOSP's
+     * own JNI/libusbhost source -- runs *synchronously*, inside that one ioctl syscall: there is
+     * no asynchronous race to wait out, only ordering. So: releasing control while we still hold
+     * streaming (the order this used to be in) permanently skips creating the playback substream
+     * for that chip's entire lifetime, confirmed, reproduced -- it never comes back no matter how
+     * long streaming sits unclaimed afterward, since control's probe already ran and decided.
+     * Releasing streaming *first* means it's already unclaimed by the time control's release
+     * triggers control's own synchronous reprobe-and-create-streams call.
+     */
+    fun releaseToKernel(session: UsbAudioSession) {
+        session.streamingAltSettings[0]?.let { session.connection.releaseInterface(it) }
+        session.connection.releaseInterface(session.controlInterface)
+        L.i("Released streaming=${session.topology.streamingInterfaceNumber} then control=${session.controlInterface.id} to kernel")
+    }
+
+    /**
+     * The inverse of [releaseToKernel]: re-claims the control and alt-0 streaming interfaces (via
+     * the public, force=true API, which internally evicts whatever Android's snd-usb-audio bound
+     * in the meantime) so a fresh bit-perfect session can resume on the *same* [session] object --
+     * callers still need their own clock/format re-setup after this (see [UsbAudioOutput]'s init
+     * logic), exactly as if this were the first activation.
+     *
+     * Returns false if re-claiming either interface failed (e.g. another process is genuinely
+     * holding it, or the device was unplugged in the interim) -- callers must treat [session] as
+     * dead in that case, the same way a mid-stream unplug is already handled elsewhere.
+     */
+    fun reclaimFromKernel(session: UsbAudioSession): Boolean {
+        if (!session.connection.claimInterface(session.controlInterface, true)) {
+            L.w("reclaimFromKernel: failed to claim control interface")
+            return false
+        }
+        val altZero = session.streamingAltSettings[0]
+        if (altZero != null && !session.connection.claimInterface(altZero, true)) {
+            L.w("reclaimFromKernel: failed to claim streaming interface")
+            session.connection.releaseInterface(session.controlInterface)
+            return false
+        }
+        L.i("Reclaimed control=${session.controlInterface.id} streaming alt-0 from kernel")
+        return true
+    }
+
     fun release(session: UsbAudioSession) {
         session.connection.releaseInterface(session.controlInterface)
         for (iface in session.streamingAltSettings.values) {
@@ -234,6 +295,41 @@ object UsbAudioController {
                 ((buffer[3].toInt() and 0xFF) shl 24)
         L.i("Clock ${session.topology.clockSourceId} current frequency: $hz Hz")
         return hz
+    }
+
+    /**
+     * DIAGNOSTIC, not used by any real code path: fetches the real channel count from a UAC3
+     * device's Cluster Descriptor by ID, answering "does this device actually support more than
+     * stereo" directly from the device instead of the hardcoded-stereo assumption
+     * [UacPlaybackTopology.channelCount] falls back to for UAC3 (that fallback exists specifically
+     * because this fetch was never wired in -- see that field's doc comment).
+     *
+     * Request parameters confirmed against the Linux kernel's own `get_cluster_channels_v3()` in
+     * `sound/usb/mixer.c`: bRequest=UAC3_CS_REQ_HIGH_CAPABILITY_DESCRIPTOR (0x06), wValue is the
+     * cluster ID directly (not a (control<<8) selector the way CUR/RANGE requests work), wIndex
+     * is just the control interface number. The response is a `uac3_cluster_header_descriptor`
+     * (wLength:2, bDescriptorType:1, bDescriptorSubtype:1, wDescriptorID:2, bNrChannels:1 -- 7
+     * bytes total, per `include/linux/usb/audio-v3.h`), with the real channel count as its last
+     * byte.
+     */
+    fun getClusterChannelCount(session: UsbAudioSession, clusterId: Int): Int? {
+        val buffer = ByteArray(7)
+        val result =
+            session.connection.controlTransfer(
+                REQ_TYPE_CLASS_INTERFACE_GET,
+                UAC3_CS_REQ_HIGH_CAPABILITY_DESCRIPTOR,
+                clusterId,
+                session.controlInterface.id,
+                buffer,
+                buffer.size,
+                1000)
+        if (result != buffer.size) {
+            L.w("GET cluster descriptor $clusterId failed: result=$result")
+            return null
+        }
+        val nrChannels = buffer[6].toInt() and 0xFF
+        L.i("Cluster $clusterId: bNrChannels=$nrChannels")
+        return nrChannels
     }
 
     /**
@@ -473,6 +569,30 @@ object UsbAudioController {
      * default) if [range] couldn't be read.
      */
     fun defaultVolumeTarget(range: Pair<Int, Int>?): Int = range?.let { (it.first + it.second) / 2 } ?: 0
+
+    /**
+     * Sets every channel's Feature Unit volume to unity gain (the top of its own reported
+     * range -- see [getVolumeRange]'s doc comment on why that's the general UAC convention for
+     * "loudest/least attenuated", not a hardcoded 0).
+     *
+     * Called right before handing the interface back to the kernel for Android's normal HAL
+     * path: that path only ever applies its own software volume curve on top of whatever the
+     * Feature Unit's hardware gain already is, the same way it would for any other ordinary USB
+     * audio device -- it has no reason to assume *this* one might be sitting at some attenuated
+     * level a different, unrelated code path (bit-perfect mode's own volume control, or just the
+     * device's own initial-activation midpoint default) left it at. Confirmed, reproduced:
+     * without this, a HAL-routed track topped out at roughly 40-50% of real full volume even at
+     * 100% system volume, because the hardware gain was still sitting wherever it was last set
+     * for bit-perfect playback (or the activation-time midpoint, if the user never even touched
+     * bit-perfect mode) -- Android's software curve was stacking on top of that, not replacing
+     * it.
+     */
+    fun setUnityVolume(session: UsbAudioSession, channelCount: Int) {
+        for (channel in 0..channelCount.coerceAtLeast(2)) {
+            val range = getVolumeRange(session, channel) ?: continue
+            setVolume(session, range.second, channel)
+        }
+    }
 
     /** Sets the Feature Unit's volume for [channel] (0=master, 1=left, 2=right), in 1/256 dB. */
     fun setVolume(session: UsbAudioSession, value: Int, channel: Int): Boolean {

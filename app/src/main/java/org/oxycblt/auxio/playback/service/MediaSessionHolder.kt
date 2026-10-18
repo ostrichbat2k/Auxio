@@ -128,6 +128,15 @@ private constructor(
         volumeScope.launch {
             usbAudioManager.controlState.collect { updateVolumeRouting() }
         }
+        volumeScope.launch {
+            // RoutingAudioSink decides per-track, not per-session, whether a given track
+            // actually goes out over the DAC -- a 96kHz track against a 44.1/48kHz-only device
+            // falls back to Android's normal HAL path even while bitPerfectMode stays on for the
+            // rest of the session. Without this, volume keys kept targeting the DAC's hardware
+            // volume for a fallback track too, forcibly reclaiming (and thus evicting) the kernel
+            // driver that HAL was actively using to play it, on every single key press.
+            usbAudioManager.playbackRoute.collect { updateVolumeRouting() }
+        }
     }
 
     fun tryMediaButtonIntent(intent: Intent): Boolean =
@@ -171,12 +180,15 @@ private constructor(
      * [UsbSettings.bitPerfectMode] is on *and* the device's volume range was actually read back
      * successfully ([UsbAudioManager.isBitPerfectCapable]) -- the same condition
      * [org.oxycblt.auxio.usb.RoutingAudioSink] uses to decide whether a track actually gets
-     * routed to the DAC, so this mirrors that rather than inventing a separate notion of "DAC
-     * active".
+     * routed to the DAC -- but that decision is itself per-track, not per-session (a format the
+     * device can't take falls back to Android's normal HAL path even while bit-perfect mode
+     * stays on), so [usbAudioManager.playbackRoute] -- RoutingAudioSink's own per-track report --
+     * is what this actually keys off of, not just the static session-level toggle.
      */
     private fun updateVolumeRouting() {
         val range = usbAudioManager.controlState.value?.volumeRange
-        if (usbSettings.bitPerfectMode && range != null) {
+        val isDirect = usbAudioManager.playbackRoute.value is UsbAudioManager.PlaybackRoute.Direct
+        if (usbSettings.bitPerfectMode && range != null && isDirect) {
             usbVolumeProvider.applyRange(range)
             mediaSession.setPlaybackToRemote(usbVolumeProvider)
         } else {
@@ -196,18 +208,27 @@ private constructor(
 
         fun applyRange(newRange: Pair<Int, Int>) {
             range = newRange
-            // controlState.volume is the device's own live GET_CUR readback, which is null here
-            // on every fresh activation on hardware that fails that query (confirmed: this is
-            // the normal case on the FiiO Snowsky Tiny A, not an edge case) -- true right up
-            // until a track actually plays and UsbAudioOutput's own init block establishes a
-            // real value. Falling back straight to newRange.second (hardware max) in that gap
-            // published "volume = max" to the system UI the instant a device activates, which
-            // was confirmed to cause the system to (re-)apply max as the real volume on the very
-            // next track -- i.e. "new song is at max until you touch the volume key once".
-            // usbSettings.volumeDb (the user's last explicitly-chosen level, persisted) is the
-            // correct thing to show in that gap instead; range max is only a last resort for a
-            // genuinely first-ever-seen device.
-            val db = usbAudioManager.controlState.value?.volume ?: usbSettings.volumeDb ?: newRange.second
+            // usbSettings.volumeDb (the user's last explicitly-chosen level, persisted, and kept
+            // in sync with HAL-mode's own volume too -- see UsbAudioManager.onStreamMusicChanged)
+            // is preferred over controlState.volume, the device's own live GET_CUR readback, even
+            // though that sounds backwards -- two real, reproduced bugs, both from trusting a
+            // "live" value that wasn't actually trustworthy at the exact moment this runs:
+            // (1) controlState.volume is null on every fresh activation on hardware that fails
+            // that query entirely (confirmed: the normal case on the FiiO Snowsky Tiny A) right
+            // up until a track actually plays and UsbAudioOutput's own init block establishes a
+            // real value -- falling through past it to usbSettings.volumeDb already handled this
+            // one correctly even before this reordering, via the next link in the chain.
+            // (2) The one this reordering actually fixes: ensureFormatActive()'s own
+            // refreshControlState() call runs *before* UsbAudioOutput's volume-restoration step
+            // on a HAL->DAC switch (getAudioOutput() calls the former, then constructs the
+            // latter), reading the Feature Unit back while it's still sitting at
+            // setUnityVolume()'s unity gain from the HAL release -- a real, non-null, but
+            // momentarily *wrong* value, published to controlState just long enough to be read
+            // here before the real restoration catches up a few lines later. Confirmed,
+            // reproduced: "switch to DAC, volume starts at/snaps to max". usbSettings.volumeDb
+            // never has this race -- it's set directly, synchronously, by whichever code path
+            // decided what the real target volume should be, not reconstructed from a readback.
+            val db = usbSettings.volumeDb ?: usbAudioManager.controlState.value?.volume ?: newRange.second
             currentVolume = dbToStep(db)
         }
 
