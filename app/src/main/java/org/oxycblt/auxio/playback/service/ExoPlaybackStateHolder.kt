@@ -165,15 +165,18 @@ class ExoPlaybackStateHolder(
                 L.d("Restoring playback state")
                 restoreScope.launch {
                     val state = persistenceRepository.readState()
-                    if (action.play || (state == null && action.fallback != null)) {
-                        // This is about to start playback -- give a DAC that's still finishing
-                        // activation (e.g. right after a cold-launch permission grant racing this
-                        // same restore) a bounded chance to be ready first. Without this, the
-                        // very first configure() call commits this track to the fallback sink
-                        // with no recovery short of the user manually changing tracks -- see
-                        // UsbAudioManager.awaitActivation's doc comment.
-                        usbAudioManager.awaitActivation()
-                    }
+                    // Applying the restored state below makes the player prepare the restored
+                    // item, which calls RoutingAudioSink.configure() to buffer ahead -- *whether
+                    // or not action.play is true*. Confirmed, reproduced: the fallback AudioTrack
+                    // got configured during prepare, ten seconds before the user's own manual
+                    // play tap, with the DAC session not ready for another ~50ms after that.
+                    // configure() only re-checks on the *next* call (next track), so losing this
+                    // race during prepare commits the restored track to fallback regardless of
+                    // when (or whether, this session) the user actually presses play. Give a DAC
+                    // that's still finishing activation (e.g. right after a cold-launch permission
+                    // grant racing this same restore) a bounded chance to be ready first -- see
+                    // UsbAudioManager.awaitActivation's doc comment.
+                    usbAudioManager.awaitActivation()
                     withContext(Dispatchers.Main) {
                         if (state != null) {
                             // Apply the saved state on the main thread to prevent code expecting
