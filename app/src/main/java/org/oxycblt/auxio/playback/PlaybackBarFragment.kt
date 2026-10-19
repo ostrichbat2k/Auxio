@@ -18,10 +18,12 @@
  
 package org.oxycblt.auxio.playback
 
+import android.graphics.drawable.Animatable
 import android.os.Bundle
 import android.view.LayoutInflater
 import androidx.fragment.app.activityViewModels
 import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
 import org.oxycblt.auxio.R
 import org.oxycblt.auxio.databinding.FragmentPlaybackBarBinding
 import org.oxycblt.auxio.detail.DetailViewModel
@@ -30,6 +32,7 @@ import org.oxycblt.auxio.music.resolveNames
 import org.oxycblt.auxio.playback.state.RepeatMode
 import org.oxycblt.auxio.ui.ViewBindingFragment
 import org.oxycblt.auxio.util.collectImmediately
+import org.ostrichbat2k.usbdac.UsbAudioManager
 import org.oxycblt.musikr.Song
 import timber.log.Timber as L
 
@@ -40,6 +43,7 @@ import timber.log.Timber as L
  */
 @AndroidEntryPoint
 class PlaybackBarFragment : ViewBindingFragment<FragmentPlaybackBarBinding>() {
+    @Inject lateinit var usbAudioManager: UsbAudioManager
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val detailModel: DetailViewModel by activityViewModels()
 
@@ -78,6 +82,7 @@ class PlaybackBarFragment : ViewBindingFragment<FragmentPlaybackBarBinding>() {
             playbackModel.isShuffled,
             ::updateBarAction,
         )
+        collectImmediately(usbAudioManager.blockPlayback, ::updateBlockPlayback)
     }
 
     override fun onDestroyBinding(binding: FragmentPlaybackBarBinding) {
@@ -104,6 +109,22 @@ class PlaybackBarFragment : ViewBindingFragment<FragmentPlaybackBarBinding>() {
 
     private fun updatePlaying(isPlaying: Boolean) {
         requireBinding().playbackPlayPause.isChecked = isPlaying
+    }
+
+    /**
+     * See [UsbAudioManager.blockPlayback]'s doc comment: disables this button and swaps its icon
+     * for a spinner while a USB DAC activation this control would otherwise race is in flight,
+     * instead of letting a tap start playback that might land on HAL purely due to timing.
+     */
+    private fun updateBlockPlayback(blocked: Boolean) {
+        val button = requireBinding().playbackPlayPause
+        button.isEnabled = !blocked
+        if (blocked) {
+            button.setIconResource(R.drawable.avd_dac_activating_24)
+            (button.icon as? Animatable)?.start()
+        } else {
+            button.setIconResource(R.drawable.sel_playing_state_24)
+        }
     }
 
     private fun updatePosition(positionDs: Long) {
