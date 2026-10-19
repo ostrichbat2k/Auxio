@@ -20,10 +20,14 @@ package org.oxycblt.auxio.settings.categories
 
 import android.os.Bundle
 import android.view.View
+import androidx.lifecycle.lifecycleScope
 import androidx.preference.Preference
 import androidx.preference.PreferenceCategory
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.oxycblt.auxio.R
 import org.oxycblt.auxio.settings.BasePreferenceFragment
 import org.ostrichbat2k.usbdac.UacStreamFormat
@@ -127,12 +131,12 @@ class UsbCapabilitiesFragment : BasePreferenceFragment(R.xml.preferences_usb_cap
                             "UAC 3.0 pushes this into a separate descriptor fetch Auxio doesn't " +
                                 "do -- falls back to assuming stereo (2 channels)."
                         }))
-            addPreference(
+            val clockPreference =
                 info(
                     label = "Clock source",
                     value =
                         if (topology.clockSourceId >= 0) {
-                            "${topology.clockSourceId} (${clockStateLabel()})"
+                            "${topology.clockSourceId} (reading…)"
                         } else {
                             "none"
                         },
@@ -146,8 +150,17 @@ class UsbCapabilitiesFragment : BasePreferenceFragment(R.xml.preferences_usb_cap
                             "This device has no separate clock entity -- UAC 1.0 doesn't have " +
                                 "the concept. Instead, each format below declares its own fixed " +
                                 "sample rate(s) directly, set via the audio connection itself."
-                        }))
+                        })
+            addPreference(clockPreference)
             if (topology.clockSourceId >= 0) {
+                // getClockInfo() does real, synchronous USB control transfers (up to ~1s each,
+                // two of them) -- keep them off the main thread instead of blocking this whole
+                // screen's redraw on them every time capabilities/controlState re-emit, which
+                // used to happen here on every single call.
+                viewLifecycleOwner.lifecycleScope.launch {
+                    val liveInfo = withContext(Dispatchers.IO) { usbAudioManager.getClockInfo() }
+                    clockPreference.title = "Clock source: ${topology.clockSourceId} (${clockStateLabel(liveInfo)})"
+                }
                 addPreference(
                     info(
                         label = "Clock supported rates",
@@ -221,11 +234,10 @@ class UsbCapabilitiesFragment : BasePreferenceFragment(R.xml.preferences_usb_cap
 
         powerCategory?.apply {
             if (topology.powerDomainId >= 0) {
-                val liveState = usbAudioManager.getPowerDomainState()
-                addPreference(
+                val powerPreference =
                     info(
                         label = "Power domain",
-                        value = "${topology.powerDomainId} (${powerStateLabel(liveState)})",
+                        value = "${topology.powerDomainId} (reading…)",
                         summary =
                             "A UAC 3.0 power-saving feature: this part of the device can sleep " +
                                 "when idle and has to be woken before streaming. Its three " +
@@ -235,7 +247,15 @@ class UsbCapabilitiesFragment : BasePreferenceFragment(R.xml.preferences_usb_cap
                                 "${topology.powerDomainD2RecoveryUs / 1000}ms). Auxio always wakes " +
                                 "it to D0 and waits out that recovery time before streaming; " +
                                 "skipping that step can produce clean, error-free silence with " +
-                                "nothing to show why."))
+                                "nothing to show why.")
+                addPreference(powerPreference)
+                // getPowerDomainState() is a real, synchronous USB control transfer (up to ~1s) --
+                // same reasoning as the clock read above: off the main thread, not blocking this
+                // screen's redraw on it.
+                viewLifecycleOwner.lifecycleScope.launch {
+                    val liveState = withContext(Dispatchers.IO) { usbAudioManager.getPowerDomainState() }
+                    powerPreference.title = "Power domain: ${topology.powerDomainId} (${powerStateLabel(liveState)})"
+                }
             } else {
                 addPreference(
                     info(
@@ -283,9 +303,9 @@ class UsbCapabilitiesFragment : BasePreferenceFragment(R.xml.preferences_usb_cap
             else -> "current state unknown"
         }
 
-    /** The Clock Source's live frequency + valid/locked reading, read fresh on every call. */
-    private fun clockStateLabel(): String {
-        val (frequency, valid) = usbAudioManager.getClockInfo() ?: (null to null)
+    /** Formats an already-fetched (off the main thread, see [update]) clock frequency/valid pair. */
+    private fun clockStateLabel(info: Pair<Int?, Boolean?>?): String {
+        val (frequency, valid) = info ?: (null to null)
         val freqPart = frequency?.let { "${it}Hz" } ?: "frequency unknown"
         val validPart =
             when (valid) {
