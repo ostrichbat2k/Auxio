@@ -15,6 +15,12 @@
         app:summary="@string/set_usb_bit_perfect_desc"
         app:title="@string/set_usb_bit_perfect" />
 
+    <SwitchPreferenceCompat
+        app:defaultValue="false"
+        app:key="@string/set_key_usb_abx_test"
+        app:summary="@string/set_usb_abx_test_desc"
+        app:title="@string/set_usb_abx_test" />
+
     <Preference
         app:key="@string/set_key_usb_device"
         app:selectable="false"

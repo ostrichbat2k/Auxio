@@ -20,6 +20,14 @@
     <string name="lbl_songs">Songs</string>
     <string name="lbl_song">Song</string>
     <string name="lbl_all_songs">All songs</string>
+    <string name="lbl_abx_prompt">ABX test -- %1$d/%2$d correct</string>
+    <string name="lbl_abx_dialog_title">What did you just hear?</string>
+    <string name="lbl_abx_guess_direct">USB DAC (bit-perfect)</string>
+    <string name="lbl_abx_guess_fallback">Normal Android audio</string>
+    <string name="lbl_abx_correct">Correct! It was %s.</string>
+    <string name="lbl_abx_incorrect">Incorrect -- it was actually %s.</string>
+    <string name="lbl_abx_route_direct">the USB DAC (bit-perfect)</string>
+    <string name="lbl_abx_route_fallback">normal Android audio</string>
 
     <string name="lbl_albums">Albums</string>
     <string name="lbl_album">Album</string>
@@ -305,6 +313,8 @@
     <string name="set_usb_bit_perfect">Bit-perfect mode</string>
     <string name="set_usb_bit_perfect_desc">Only use the DAC for playback when a track can be sent to it unchanged -- exact sample rate match, no digital volume attenuation. Tracks that don\'t qualify play through normal Android audio output instead.</string>
     <string name="set_usb_bit_perfect_not_capable">Not available -- this device\'s output volume range couldn\'t be confirmed, so Auxio can\'t guarantee unity gain (no digital attenuation)</string>
+    <string name="set_usb_abx_test">ABX listening test</string>
+    <string name="set_usb_abx_test_desc">While on, Auxio secretly randomizes bit-perfect vs normal output per track and hides which one is active on the Now Playing screen -- each time the track changes, you\'ll be asked to guess, blind, which one you just heard.</string>
     <string name="set_usb_device">Device</string>
     <string name="set_usb_device_none">No USB audio device attached</string>
     <string name="set_usb_retry">Retry activation</string>

@@ -41,6 +41,9 @@ class UsbSettingsImpl @Inject constructor(@ApplicationContext context: Context) 
     override val bitPerfectMode: Boolean
         get() = sharedPreferences.getBoolean(getString(R.string.set_key_usb_bit_perfect), false)
 
+    override val abxTestMode: Boolean
+        get() = sharedPreferences.getBoolean(getString(R.string.set_key_usb_abx_test), false)
+
     override var volumeDb: Int?
         get() =
             getString(R.string.set_key_usb_volume).let { key ->
@@ -57,6 +60,7 @@ class UsbSettingsImpl @Inject constructor(@ApplicationContext context: Context) 
         when (key) {
             getString(R.string.set_key_usb_enabled) -> listener.onUsbEnabledChanged()
             getString(R.string.set_key_usb_bit_perfect) -> listener.onBitPerfectModeChanged()
+            getString(R.string.set_key_usb_abx_test) -> listener.onAbxTestModeChanged()
         }
     }
 }
