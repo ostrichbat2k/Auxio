@@ -21,21 +21,32 @@ package org.oxycblt.auxio
 import android.content.Intent
 import android.os.Bundle
 import android.view.View
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.view.WindowCompat
 import androidx.core.view.updatePadding
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
+import kotlinx.coroutines.launch
 import org.oxycblt.auxio.databinding.ActivityMainBinding
+import org.oxycblt.auxio.music.MusicViewModel
 import org.oxycblt.auxio.playback.PlaybackViewModel
 import org.oxycblt.auxio.playback.state.DeferredPlayback
 import org.oxycblt.auxio.ui.UISettings
 import org.ostrichbat2k.usbdac.UsbAudioManager
 import org.ostrichbat2k.usbdac.UsbDacPreferences
+import org.oxycblt.auxio.util.getPlural
 import org.oxycblt.auxio.util.isNight
+import org.oxycblt.auxio.util.showToast
 import org.oxycblt.auxio.util.systemBarInsetsCompat
+import org.oxycblt.musikr.Song
 import timber.log.Timber as L
 
 /**
@@ -55,9 +66,20 @@ import timber.log.Timber as L
 @AndroidEntryPoint
 class MainActivity : AppCompatActivity() {
     private val playbackModel: PlaybackViewModel by viewModels()
+    private val musicModel: MusicViewModel by viewModels()
     @Inject lateinit var uiSettings: UISettings
     @Inject lateinit var usbAudioManager: UsbAudioManager
     @Inject lateinit var usbSettings: UsbDacPreferences
+
+    // Only MainActivity (a long-lived, single Activity) can host this launcher and reliably get
+    // a result back -- the menu dialog that actually requests a deletion is a bottom sheet that
+    // closes itself the instant any option is clicked (see MenuDialogFragment.onClick), so by the
+    // time the system's delete-confirmation dialog this launches returns a result, that fragment
+    // is long gone.
+    private val deleteRequestLauncher =
+        registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+            musicModel.onDeleteRequestResult(result.resultCode == RESULT_OK)
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -66,6 +88,32 @@ class MainActivity : AppCompatActivity() {
         val binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         setupEdgeToEdge(binding.root)
+
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                launch {
+                    musicModel.deleteRequest.flow.collect { intentSender ->
+                        if (intentSender == null) return@collect
+                        musicModel.deleteRequest.consume()
+                        deleteRequestLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
+                    }
+                }
+                launch {
+                    musicModel.songMessage.flow.collect { message ->
+                        if (message == null) return@collect
+                        musicModel.songMessage.consume()
+                        showToast(message.stringRes)
+                    }
+                }
+                launch {
+                    musicModel.deleteConfirmation.flow.collect { songs ->
+                        if (songs == null) return@collect
+                        musicModel.deleteConfirmation.consume()
+                        showDeleteConfirmation(songs)
+                    }
+                }
+            }
+        }
 
         L.d("Activity created")
     }
@@ -98,6 +146,17 @@ class MainActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         startIntentAction(intent)
+    }
+
+    /** See [MusicViewModel.deleteConfirmation]'s doc comment for why this always runs. */
+    private fun showDeleteConfirmation(songs: List<Song>) {
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.lbl_confirm_delete_song)
+            .setMessage(
+                getString(R.string.fmt_deletion_info, getPlural(R.plurals.fmt_song_count, songs.size)))
+            .setPositiveButton(R.string.lbl_delete) { _, _ -> musicModel.confirmDeleteSongs(songs) }
+            .setNegativeButton(R.string.lbl_cancel, null)
+            .show()
     }
 
     private fun setupTheme() {

@@ -209,7 +209,7 @@ private constructor(
         fun applyRange(newRange: Pair<Int, Int>) {
             range = newRange
             // usbSettings.volumeDb (the user's last explicitly-chosen level, persisted, and kept
-            // in sync with HAL-mode's own volume too -- see UsbAudioManager.onStreamMusicChanged)
+            // in sync with HAL-mode's own volume too -- see UsbVolumeController.onStreamMusicChanged)
             // is preferred over controlState.volume, the device's own live GET_CUR readback, even
             // though that sounds backwards -- two real, reproduced bugs, both from trusting a
             // "live" value that wasn't actually trustworthy at the exact moment this runs:
@@ -222,7 +222,7 @@ private constructor(
             // refreshControlState() call runs *before* UsbAudioOutput's volume-restoration step
             // on a HAL->DAC switch (getAudioOutput() calls the former, then constructs the
             // latter), reading the Feature Unit back while it's still sitting at
-            // setUnityVolume()'s unity gain from the HAL release -- a real, non-null, but
+            // UsbVolumeController.prepareForHalHandoff()'s unity gain from the HAL release -- a real, non-null, but
             // momentarily *wrong* value, published to controlState just long enough to be read
             // here before the real restoration catches up a few lines later. Confirmed,
             // reproduced: "switch to DAC, volume starts at/snaps to max". usbSettings.volumeDb

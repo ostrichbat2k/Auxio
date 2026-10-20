@@ -19,6 +19,7 @@
 package org.oxycblt.auxio.music
 
 import android.content.Context
+import android.content.IntentSender
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -51,7 +52,7 @@ import timber.log.Timber as L
 class MusicViewModel
 @Inject
 constructor(
-    @ApplicationContext context: Context,
+    @ApplicationContext private val context: Context,
     private val listSettings: ListSettings,
     private val musicRepository: MusicRepository,
 ) : ViewModel(), MusicRepository.UpdateListener, MusicRepository.IndexingListener {
@@ -75,6 +76,28 @@ constructor(
 
     val playlistMessage: Event<PlaylistMessage>
         field = MutableEvent<PlaylistMessage>()
+
+    val songMessage: Event<SongMessage>
+        field = MutableEvent<SongMessage>()
+
+    /**
+     * A system delete-confirmation prompt awaiting a host [android.app.Activity] able to launch
+     * it and report back the result -- see [DeviceFileDeleter] for why this can't just be
+     * performed outright from here.
+     */
+    val deleteRequest: Event<IntentSender>
+        field = MutableEvent<IntentSender>()
+
+    /**
+     * A pending deletion awaiting the user's own in-app confirmation -- unlike [deleteRequest],
+     * this always needs to happen regardless of [org.oxycblt.auxio.music.locations.LocationMode]:
+     * a SAF-mode delete goes straight through on the write grant this app already holds on that
+     * folder (see [DeviceFileDeleter]), with no system prompt of its own at all, so without this
+     * there would be no confirmation step whatsoever before an irreversible delete for the mode
+     * every one of this app's real-world location setups actually uses.
+     */
+    val deleteConfirmation: Event<List<Song>>
+        field = MutableEvent<List<Song>>()
 
     init {
         musicRepository.addUpdateListener(this)
@@ -352,6 +375,59 @@ constructor(
     }
 
     /**
+     * Requests permanently deleting the underlying audio files behind [songs] from device
+     * storage. Always goes through [deleteConfirmation] first -- see its own doc comment for why
+     * this can't be skipped even on a path that's also going to show its own system prompt.
+     *
+     * @param songs The [Song]s to delete.
+     */
+    fun deleteSongs(songs: List<Song>) {
+        if (songs.isEmpty()) return
+        L.d("Launching deletion confirmation for ${songs.size} songs")
+        deleteConfirmation.put(songs)
+    }
+
+    /**
+     * Actually performs a deletion the user has already confirmed via [deleteConfirmation]. See
+     * [DeviceFileDeleter] for the version-specific consent flow this goes through; a system
+     * confirmation prompt needed along the way surfaces through [deleteRequest] instead of being
+     * handled here, since only a host [android.app.Activity] can launch it.
+     *
+     * @param songs The [Song]s to delete.
+     */
+    fun confirmDeleteSongs(songs: List<Song>) {
+        if (songs.isEmpty()) return
+        L.d("Deleting ${songs.size} songs")
+        viewModelScope.launch(Dispatchers.IO) {
+            when (val result = DeviceFileDeleter.delete(context.contentResolver, songs)) {
+                is DeviceFileDeleter.Result.NeedsConfirmation -> deleteRequest.put(result.intentSender)
+                is DeviceFileDeleter.Result.Done -> finishDelete(result.success)
+            }
+        }
+    }
+
+    /**
+     * Reports the outcome of a [deleteRequest] prompt once the host [android.app.Activity] that
+     * launched it gets a result back.
+     *
+     * @param success Whether the user actually went through with the deletion.
+     */
+    fun onDeleteRequestResult(success: Boolean) {
+        L.d("Delete request result: success=$success")
+        finishDelete(success)
+    }
+
+    private fun finishDelete(success: Boolean) {
+        songMessage.put(if (success) SongMessage.DeleteSuccess else SongMessage.DeleteFailed)
+        if (success) {
+            // Nudge an immediate reindex rather than waiting on the usual watched-folder
+            // ContentObserver debounce -- we already know exactly what changed and don't need
+            // to wait to find out.
+            musicRepository.requestIndex(true)
+        }
+    }
+
+    /**
      * Non-manipulated statistics bound the last successful music load.
      *
      * @param songs The amount of [Song]s that were loaded.
@@ -482,5 +558,19 @@ sealed interface PlaylistMessage {
     data object ExportFailed : PlaylistMessage {
         override val stringRes: Int
             get() = R.string.err_export_failed
+    }
+}
+
+sealed interface SongMessage {
+    val stringRes: Int
+
+    data object DeleteSuccess : SongMessage {
+        override val stringRes: Int
+            get() = R.string.lng_song_deleted
+    }
+
+    data object DeleteFailed : SongMessage {
+        override val stringRes: Int
+            get() = R.string.err_delete_failed
     }
 }

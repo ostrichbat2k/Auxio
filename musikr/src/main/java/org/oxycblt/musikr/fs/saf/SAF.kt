@@ -82,6 +82,20 @@ private constructor(
             observers.add(observer)
         }
 
+        // The SAF tree URI's own ContentObserver only reliably fires for changes made through
+        // this app's own SAF writes -- confirmed, reproduced: a file added directly to a
+        // selected folder (adb cp, a file manager, an MTP/PC transfer, i.e. every real-world
+        // case other than Auxio itself writing into that tree) got scanned into MediaStore
+        // within seconds, but never triggered the tree observer above at all. MediaStore's own
+        // scanning is what's actually reliable here regardless of how the file arrived -- the
+        // same signal MediaStore.track() already relies on for LocationMode.MEDIA_STORE -- so
+        // watch it here too as the real trigger, keeping the tree observers above as a cheap,
+        // possibly-faster-in-some-cases addition rather than removing them.
+        observers.add(
+            LocationObserver(context, AOSPMediaStore.Audio.Media.EXTERNAL_CONTENT_URI) {
+                trySend(FSUpdate.LocationChanged(null))
+            })
+
         awaitClose { observers.forEach { observer -> observer.release() } }
     }
 
