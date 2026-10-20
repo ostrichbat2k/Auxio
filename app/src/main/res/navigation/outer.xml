@@ -84,12 +84,20 @@
         <action
             android:id="@+id/usb_capabilities"
             app:destination="@id/usb_capabilities_fragment" />
+        <action
+            android:id="@+id/usb_pipeline"
+            app:destination="@id/usb_pipeline_fragment" />
     </fragment>
 
     <fragment
         android:id="@+id/usb_capabilities_fragment"
         android:name="org.oxycblt.auxio.settings.categories.UsbCapabilitiesFragment"
         android:label="usb_capabilities_fragment" />
+
+    <fragment
+        android:id="@+id/usb_pipeline_fragment"
+        android:name="org.oxycblt.auxio.settings.categories.UsbPipelineFragment"
+        android:label="usb_pipeline_fragment" />
 
     <dialog
         android:id="@+id/accent_dialog"

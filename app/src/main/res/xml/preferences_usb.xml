@@ -36,6 +36,11 @@
         app:summary="@string/set_usb_capabilities_desc"
         app:title="@string/set_usb_capabilities" />
 
+    <Preference
+        app:key="@string/set_key_usb_pipeline"
+        app:summary="@string/set_usb_pipeline_desc"
+        app:title="@string/set_usb_pipeline" />
+
     <PreferenceCategory
         app:key="@string/set_key_usb_controls_category"
         app:title="@string/set_usb_controls_category" />

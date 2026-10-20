@@ -321,6 +321,13 @@
     <string name="set_usb_retry_desc">Re-run DAC setup for the attached device</string>
     <string name="set_usb_capabilities">Capabilities</string>
     <string name="set_usb_capabilities_desc">What Auxio found on this device, explained</string>
+    <string name="set_usb_pipeline">Pipeline</string>
+    <string name="set_usb_pipeline_desc">Live view of data flowing from the file to the DAC</string>
+    <string name="set_usb_pipeline_stage_file">File</string>
+    <string name="set_usb_pipeline_stage_route">Route</string>
+    <string name="set_usb_pipeline_stage_buffer">Ring buffer</string>
+    <string name="set_usb_pipeline_stage_transfer">USB transfer</string>
+    <string name="set_usb_pipeline_stage_device">Device</string>
     <string name="set_usb_capabilities_none">Nothing discovered yet -- activates once a USB DAC is attached and permitted</string>
     <string name="set_usb_capabilities_device_category">Device</string>
     <string name="set_usb_capabilities_interfaces_category">USB interfaces</string>
