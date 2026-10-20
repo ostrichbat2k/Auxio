@@ -323,6 +323,7 @@
     <string name="set_usb_capabilities_desc">What Auxio found on this device, explained</string>
     <string name="set_usb_capabilities_none">Nothing discovered yet -- activates once a USB DAC is attached and permitted</string>
     <string name="set_usb_capabilities_device_category">Device</string>
+    <string name="set_usb_capabilities_interfaces_category">USB interfaces</string>
     <string name="set_usb_capabilities_topology_category">Audio routing</string>
     <string name="set_usb_capabilities_power_category">Power</string>
     <string name="set_usb_capabilities_formats_category">Formats</string>

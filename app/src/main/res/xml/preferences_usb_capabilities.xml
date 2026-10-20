@@ -8,6 +8,10 @@
         app:title="@string/set_usb_capabilities_device_category" />
 
     <PreferenceCategory
+        app:key="@string/set_key_usb_capabilities_interfaces_category"
+        app:title="@string/set_usb_capabilities_interfaces_category" />
+
+    <PreferenceCategory
         app:key="@string/set_key_usb_capabilities_topology_category"
         app:title="@string/set_usb_capabilities_topology_category" />
 

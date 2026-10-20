@@ -13,6 +13,7 @@
     <string name="set_key_usb_retry" translatable="false">auxio_usb_retry</string>
     <string name="set_key_usb_capabilities" translatable="false">auxio_usb_capabilities</string>
     <string name="set_key_usb_capabilities_device_category" translatable="false">auxio_usb_capabilities_device_category</string>
+    <string name="set_key_usb_capabilities_interfaces_category" translatable="false">auxio_usb_capabilities_interfaces_category</string>
     <string name="set_key_usb_capabilities_topology_category" translatable="false">auxio_usb_capabilities_topology_category</string>
     <string name="set_key_usb_capabilities_power_category" translatable="false">auxio_usb_capabilities_power_category</string>
     <string name="set_key_usb_capabilities_formats_category" translatable="false">auxio_usb_capabilities_formats_category</string>

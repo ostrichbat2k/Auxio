@@ -18,6 +18,7 @@
 
 package org.oxycblt.auxio.settings.categories
 
+import android.hardware.usb.UsbConstants
 import android.os.Bundle
 import android.view.View
 import androidx.lifecycle.lifecycleScope
@@ -35,6 +36,7 @@ import org.ostrichbat2k.usbdac.UsbAudioController
 import org.ostrichbat2k.usbdac.UsbAudioManager
 import org.ostrichbat2k.usbdac.UsbControlState
 import org.ostrichbat2k.usbdac.UsbDeviceCapabilities
+import org.ostrichbat2k.usbdac.UsbInterfaceInfo
 import org.oxycblt.auxio.util.collectImmediately
 
 /**
@@ -59,6 +61,8 @@ class UsbCapabilitiesFragment : BasePreferenceFragment(R.xml.preferences_usb_cap
     private fun update(capabilities: UsbDeviceCapabilities?, controlState: UsbControlState?) {
         val deviceCategory =
             findPreference<PreferenceCategory>(getString(R.string.set_key_usb_capabilities_device_category))
+        val interfacesCategory =
+            findPreference<PreferenceCategory>(getString(R.string.set_key_usb_capabilities_interfaces_category))
         val topologyCategory =
             findPreference<PreferenceCategory>(getString(R.string.set_key_usb_capabilities_topology_category))
         val powerCategory =
@@ -66,6 +70,7 @@ class UsbCapabilitiesFragment : BasePreferenceFragment(R.xml.preferences_usb_cap
         val formatsCategory =
             findPreference<PreferenceCategory>(getString(R.string.set_key_usb_capabilities_formats_category))
         deviceCategory?.removeAll()
+        interfacesCategory?.removeAll()
         topologyCategory?.removeAll()
         powerCategory?.removeAll()
         formatsCategory?.removeAll()
@@ -97,6 +102,22 @@ class UsbCapabilitiesFragment : BasePreferenceFragment(R.xml.preferences_usb_cap
                     label = "USB Audio Class",
                     value = "UAC ${topology.uacVersion}.0",
                     summary = uacVersionExplanation(topology.uacVersion)))
+        }
+
+        interfacesCategory?.apply {
+            if (capabilities.interfaces.isEmpty()) {
+                addPreference(
+                    info(
+                        "Interface list unavailable -- this can happen right after activation; " +
+                            "reopen this screen or retry activation."))
+            }
+            for (iface in capabilities.interfaces) {
+                addPreference(
+                    info(
+                        label = "Interface ${iface.number}",
+                        value = usbInterfaceClassName(iface.interfaceClass),
+                        summary = usbInterfaceRoleExplanation(iface)))
+            }
         }
 
         topologyCategory?.apply {
@@ -335,6 +356,46 @@ class UsbCapabilitiesFragment : BasePreferenceFragment(R.xml.preferences_usb_cap
         val valuePart = value?.toString() ?: "unknown"
         val rangePart = range?.let { " (range ${it.first}..${it.second})" } ?: ""
         return "$valuePart/256dB$rangePart"
+    }
+
+    /** A human name for an `UsbConstants.USB_CLASS_*` value, falling back to the raw number. */
+    private fun usbInterfaceClassName(interfaceClass: Int): String =
+        when (interfaceClass) {
+            UsbConstants.USB_CLASS_AUDIO -> "Audio"
+            UsbConstants.USB_CLASS_HID -> "HID (buttons/remote)"
+            UsbConstants.USB_CLASS_COMM -> "Communications"
+            UsbConstants.USB_CLASS_MASS_STORAGE -> "Mass storage"
+            UsbConstants.USB_CLASS_HUB -> "Hub"
+            UsbConstants.USB_CLASS_VIDEO -> "Video"
+            UsbConstants.USB_CLASS_PRINTER -> "Printer"
+            UsbConstants.USB_CLASS_STILL_IMAGE -> "Still image"
+            UsbConstants.USB_CLASS_WIRELESS_CONTROLLER -> "Wireless controller"
+            UsbConstants.USB_CLASS_MISC -> "Miscellaneous"
+            UsbConstants.USB_CLASS_VENDOR_SPEC -> "Vendor-specific"
+            else -> "Unknown class 0x%02x".format(interfaceClass)
+        }
+
+    /**
+     * Explains what Auxio actually does with [iface] -- a composite device (a headset with its
+     * own inline-remote HID interface alongside its audio ones, confirmed on a real EarPods) has
+     * interfaces here that none of the rest of this screen ever mentions, and it matters to say
+     * plainly that Auxio leaves them alone: a direct-USB claim evicting the kernel driver from
+     * every interface briefly, confirmed, reproduced, used to leave a non-audio one -- a remote's
+     * HID interface -- stuck unclaimed with its physical buttons dead for the rest of the
+     * session, once nothing ever gave it back.
+     */
+    private fun usbInterfaceRoleExplanation(iface: UsbInterfaceInfo): String {
+        val altsNote = if (iface.alternateSettingCount > 1) " (${iface.alternateSettingCount} alternate settings)" else ""
+        return when (iface.role) {
+            UsbInterfaceInfo.Role.CONTROL -> "Auxio's control interface$altsNote -- see Audio routing below."
+            UsbInterfaceInfo.Role.STREAMING -> "Auxio's streaming interface$altsNote -- see Audio routing below."
+            UsbInterfaceInfo.Role.OTHER_AUDIO ->
+                "Audio class, but not the playback path Auxio uses$altsNote -- likely a capture " +
+                    "(microphone) interface. Auxio doesn't claim this."
+            UsbInterfaceInfo.Role.NON_AUDIO ->
+                "Not audio at all$altsNote -- e.g. a remote control's buttons. Auxio never claims " +
+                    "this and leaves it for the rest of the system to use normally."
+        }
     }
 
     private fun uacVersionExplanation(version: Int) =
