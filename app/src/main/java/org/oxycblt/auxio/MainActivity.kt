@@ -32,6 +32,8 @@ import org.oxycblt.auxio.databinding.ActivityMainBinding
 import org.oxycblt.auxio.playback.PlaybackViewModel
 import org.oxycblt.auxio.playback.state.DeferredPlayback
 import org.oxycblt.auxio.ui.UISettings
+import org.ostrichbat2k.usbdac.UsbAudioManager
+import org.ostrichbat2k.usbdac.UsbDacPreferences
 import org.oxycblt.auxio.util.isNight
 import org.oxycblt.auxio.util.systemBarInsetsCompat
 import timber.log.Timber as L
@@ -54,6 +56,8 @@ import timber.log.Timber as L
 class MainActivity : AppCompatActivity() {
     private val playbackModel: PlaybackViewModel by viewModels()
     @Inject lateinit var uiSettings: UISettings
+    @Inject lateinit var usbAudioManager: UsbAudioManager
+    @Inject lateinit var usbSettings: UsbDacPreferences
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -62,6 +66,7 @@ class MainActivity : AppCompatActivity() {
         val binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         setupEdgeToEdge(binding.root)
+
         L.d("Activity created")
     }
 
@@ -77,6 +82,16 @@ class MainActivity : AppCompatActivity() {
         if (!startIntentAction(intent)) {
             // No intent action to do, just restore the previously saved state.
             playbackModel.playDeferred(DeferredPlayback.RestoreState(false))
+        }
+
+        // Permission prompts need a foregrounded Activity, so ask here rather than in
+        // UsbAudioManager itself for any device we've detected but don't yet have access to.
+        // Direct USB output is opt-in (off by default), so don't prompt unless the user has
+        // actually turned it on in settings.
+        if (usbSettings.enabled) {
+            usbAudioManager.devices.value
+                .filterNot { it.hasPermission }
+                .forEach { usbAudioManager.requestPermission(it.device) }
         }
     }
 

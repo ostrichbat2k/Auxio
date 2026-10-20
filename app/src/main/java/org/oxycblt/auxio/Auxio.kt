@@ -20,6 +20,7 @@ package org.oxycblt.auxio
 
 import android.app.Application
 import android.content.Intent
+import android.os.StrictMode
 import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.core.graphics.drawable.IconCompat
@@ -29,6 +30,7 @@ import org.oxycblt.auxio.home.HomeSettings
 import org.oxycblt.auxio.image.ImageSettings
 import org.oxycblt.auxio.playback.PlaybackSettings
 import org.oxycblt.auxio.ui.UISettings
+import org.ostrichbat2k.usbdac.UsbAudioManager
 import org.oxycblt.auxio.util.CopyleftNoticeTree
 import timber.log.Timber
 
@@ -43,9 +45,21 @@ class Auxio : Application() {
     @Inject lateinit var playbackSettings: PlaybackSettings
     @Inject lateinit var uiSettings: UISettings
     @Inject lateinit var homeSettings: HomeSettings
+    @Inject lateinit var usbAudioManager: UsbAudioManager
 
     override fun onCreate() {
         super.onCreate()
+        if (BuildConfig.DEBUG) {
+            // Debug-only: flags accidental main-thread disk/network I/O (e.g. the kind of
+            // blocking USB control transfer that UsbCapabilitiesFragment used to run directly
+            // from its preference-building code) and leaked Closeables/cursors as they happen,
+            // instead of relying on noticing the jank or the leak by hand. Doesn't catch the
+            // USB layer's own deliberate blocking I/O -- that all runs on dedicated background
+            // threads already, which StrictMode's thread policy doesn't watch.
+            StrictMode.setThreadPolicy(
+                StrictMode.ThreadPolicy.Builder().detectAll().penaltyLog().build())
+            StrictMode.setVmPolicy(StrictMode.VmPolicy.Builder().detectAll().penaltyLog().build())
+        }
         @Suppress("KotlinConstantConditions")
         if (
             BuildConfig.APPLICATION_ID != "org.oxycblt.auxio" &&
@@ -61,6 +75,7 @@ class Auxio : Application() {
         playbackSettings.migrate()
         uiSettings.migrate()
         homeSettings.migrate()
+        usbAudioManager.start()
         // Adding static shortcuts in a dynamic manner is better than declaring them
         // manually, as it will properly handle the difference between debug and release
         // Auxio instances.

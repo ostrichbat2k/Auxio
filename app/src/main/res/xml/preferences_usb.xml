@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    app:title="@string/set_usb">
+
+    <SwitchPreferenceCompat
+        app:defaultValue="false"
+        app:key="@string/set_key_usb_enabled"
+        app:summary="@string/set_usb_enabled_desc"
+        app:title="@string/set_usb_enabled" />
+
+    <SwitchPreferenceCompat
+        app:defaultValue="false"
+        app:key="@string/set_key_usb_bit_perfect"
+        app:summary="@string/set_usb_bit_perfect_desc"
+        app:title="@string/set_usb_bit_perfect" />
+
+    <SwitchPreferenceCompat
+        app:defaultValue="false"
+        app:key="@string/set_key_usb_abx_test"
+        app:summary="@string/set_usb_abx_test_desc"
+        app:title="@string/set_usb_abx_test" />
+
+    <Preference
+        app:key="@string/set_key_usb_device"
+        app:selectable="false"
+        app:title="@string/set_usb_device" />
+
+    <Preference
+        app:key="@string/set_key_usb_retry"
+        app:summary="@string/set_usb_retry_desc"
+        app:title="@string/set_usb_retry" />
+
+    <Preference
+        app:key="@string/set_key_usb_capabilities"
+        app:summary="@string/set_usb_capabilities_desc"
+        app:title="@string/set_usb_capabilities" />
+
+    <PreferenceCategory
+        app:key="@string/set_key_usb_controls_category"
+        app:title="@string/set_usb_controls_category" />
+
+    <PreferenceCategory
+        app:key="@string/set_key_usb_log_category"
+        app:title="@string/set_usb_log_category" />
+
+</PreferenceScreen>

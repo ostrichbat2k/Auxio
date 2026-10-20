@@ -18,15 +18,18 @@
  
 package org.oxycblt.auxio.playback
 
+import android.animation.ObjectAnimator
 import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.media.audiofx.AudioEffect
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import android.view.LayoutInflater
 import android.view.MenuItem
 import android.view.View
+import android.view.animation.LinearInterpolator
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.widget.Toolbar
@@ -35,6 +38,7 @@ import androidx.dynamicanimation.animation.SpringForce
 import androidx.fragment.app.activityViewModels
 import androidx.fragment.app.viewModels
 import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
 import kotlin.math.abs
 import org.oxycblt.auxio.R
 import org.oxycblt.auxio.databinding.FragmentPlaybackPanelBinding
@@ -42,6 +46,7 @@ import org.oxycblt.auxio.detail.DetailViewModel
 import org.oxycblt.auxio.list.ListViewModel
 import org.oxycblt.auxio.music.resolve
 import org.oxycblt.auxio.music.resolveNames
+import org.oxycblt.auxio.music.resolveShort
 import org.oxycblt.auxio.playback.queue.QueueViewModel
 import org.oxycblt.auxio.playback.state.RepeatMode
 import org.oxycblt.auxio.playback.ui.StyledSeekBar
@@ -51,6 +56,10 @@ import org.oxycblt.auxio.playback.ui.swiper.CarouselTransformer
 import org.oxycblt.auxio.playback.ui.swiper.CoverPagerAdapter
 import org.oxycblt.auxio.playback.ui.swiper.UserAwarePagerCallback
 import org.oxycblt.auxio.ui.ViewBindingFragment
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import org.ostrichbat2k.usbdac.UsbAudioManager
+import org.ostrichbat2k.usbdac.UsbControlState
+import org.ostrichbat2k.usbdac.UsbDacPreferences
 import org.oxycblt.auxio.util.collectImmediately
 import org.oxycblt.auxio.util.dampen
 import org.oxycblt.auxio.util.recycler
@@ -75,6 +84,8 @@ class PlaybackPanelFragment :
     Toolbar.OnMenuItemClickListener,
     StyledSeekBar.Listener,
     StepperOverlay.Listener {
+    @Inject lateinit var usbAudioManager: UsbAudioManager
+    @Inject lateinit var usbSettings: UsbDacPreferences
     private val coverPagerAdapter = CoverPagerAdapter(this)
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val detailModel: DetailViewModel by activityViewModels()
@@ -181,6 +192,12 @@ class PlaybackPanelFragment :
         collectImmediately(playbackModel.isPlaying, ::updatePlaying)
         collectImmediately(playbackModel.isShuffled, ::updateShuffled)
         collectImmediately(playbackModel.pagerQueue, ::updatePager)
+        collectImmediately(usbAudioManager.playbackRoute, usbAudioManager.controlState, ::updateUsbStatus)
+        collectImmediately(usbAudioManager.abxStats) { _ ->
+            updateUsbStatus(usbAudioManager.playbackRoute.value, usbAudioManager.controlState.value)
+        }
+        collectImmediately(usbAudioManager.abxPendingGuess, ::updateAbxPendingGuess)
+        collectImmediately(usbAudioManager.blockPlayback, ::updateBlockPlayback)
     }
 
     // FIXME: Old code!! Maybe not necessary anymore?
@@ -270,6 +287,13 @@ class PlaybackPanelFragment :
         binding.playbackArtist.text = song.artists.resolveNames(context)
         binding.playbackAlbum?.text = song.album.name.resolve(context)
         binding.playbackSeekBar?.durationDs = song.durationMs.msToDs()
+        // playbackRoute/controlState (updateUsbStatus's own triggers) don't necessarily re-emit
+        // on every track change -- two consecutive HAL-fallback tracks report the exact same
+        // PlaybackRoute.Fallback value (always the fixed HAL output format, never the file's own),
+        // which a StateFlow conflates away as a no-op. The bitrate shown alongside it is per-track
+        // though, so it needs its own refresh right here, not just whenever route/controlState
+        // actually change.
+        updateUsbStatus(usbAudioManager.playbackRoute.value, usbAudioManager.controlState.value)
     }
 
     private fun updateParent(parent: MusicParent?) {
@@ -277,6 +301,105 @@ class PlaybackPanelFragment :
         val context = requireContext()
         binding.playbackToolbar.subtitle =
             parent?.run { name.resolve(context) } ?: context.getString(R.string.lbl_all_songs)
+    }
+
+    /**
+     * Shows exactly what [org.ostrichbat2k.usbdac.RoutingAudioSink] is doing with the current
+     * track, always visible (not just while a DAC session exists) since the current track's
+     * format/bitrate is real, file-derived info relevant to every user.
+     *
+     * Both [UsbAudioManager.PlaybackRoute.Direct] and [UsbAudioManager.PlaybackRoute.Fallback]
+     * carry the file's own real bit depth/sample rate (see [UsbAudioManager.PlaybackRoute
+     * .Fallback]'s own doc comment for why Fallback's fields mean this despite not being what HAL
+     * is actually doing), so both render the same five-segment layout here -- only the leading
+     * path label ("USB" vs. "HAL") differs. The container/codec label and bitrate are always the
+     * file's own, independent of route entirely -- a compressed source's bitrate has no bearing on
+     * the decoded PCM actually reaching either sink.
+     */
+    private fun updateUsbStatus(route: UsbAudioManager.PlaybackRoute, controlState: UsbControlState?) {
+        val statusView = requireBinding().playbackUsbStatus
+        statusView.visibility = View.VISIBLE
+        if (usbSettings.abxTestMode && controlState != null) {
+            // Deliberately never derived from `route` here -- the path label itself (USB vs. HAL)
+            // would give away which route is live just as plainly as the format details would.
+            // The guess prompt itself is triggered on track change (see updateAbxPendingGuess),
+            // not from here -- this just reports the running score.
+            val stats = usbAudioManager.abxStats.value
+            statusView.text = getString(R.string.lbl_abx_prompt, stats.correct, stats.total)
+            return
+        }
+        val song = playbackModel.song.value
+        val formatLabel = song?.format?.resolveShort()
+        val bitrateLabel = song?.let { getString(R.string.fmt_bitrate, it.bitrateKbps) }
+        statusView.text =
+            when (route) {
+                is UsbAudioManager.PlaybackRoute.Direct ->
+                    formatStatus("USB", formatLabel, route.bitDepth, route.sampleRateHz, bitrateLabel)
+                is UsbAudioManager.PlaybackRoute.Fallback ->
+                    formatStatus("HAL", formatLabel, route.bitDepth, route.sampleRateHz, bitrateLabel)
+                UsbAudioManager.PlaybackRoute.Switching -> "Switching audio output…"
+            }
+    }
+
+    private fun formatStatus(
+        pathLabel: String,
+        formatLabel: String?,
+        bitDepth: Int?,
+        sampleRateHz: Int,
+        bitrateLabel: String?,
+    ): String =
+        listOfNotNull(pathLabel, formatLabel, bitDepth?.let { "$it-bit" }, bitrateLabel, formatSampleRate(sampleRateHz))
+            .joinToString(" · ")
+
+    /**
+     * Fires on every track change while an ABX test is running (see
+     * [UsbAudioManager.abxPendingGuess]'s doc comment) -- prompts about whichever track just
+     * finished, never the one that's now playing. Pauses first: the queue has already advanced
+     * to the next (independently, freshly-rolled) track by this point, and letting it keep
+     * playing while the user is still deciding about the *previous* one would both be a
+     * distraction and risk them answering about the wrong track entirely.
+     */
+    private fun updateAbxPendingGuess(pending: Boolean?) {
+        if (pending == null) return
+        if (playbackModel.isPlaying.value) playbackModel.togglePlaying()
+        showAbxGuessDialog()
+    }
+
+    /**
+     * Grades the guess immediately via [UsbAudioManager.submitAbxGuess], which also consumes the
+     * trial -- this dialog can't be reopened for the same track after a guess, same as a real ABX
+     * test only counting one answer per trial. Not cancelable: a dismissed-without-answering
+     * trial would otherwise silently vanish (the next track change overwrites it) with no
+     * indication anything was missed.
+     */
+    private fun showAbxGuessDialog() {
+        val context = requireContext()
+        MaterialAlertDialogBuilder(context)
+            .setCancelable(false)
+            .setTitle(R.string.lbl_abx_dialog_title)
+            .setItems(
+                arrayOf(
+                    getString(R.string.lbl_abx_guess_direct), getString(R.string.lbl_abx_guess_fallback))) { _, which ->
+                    val guessedDirect = which == 0
+                    val correct = usbAudioManager.submitAbxGuess(guessedDirect) ?: return@setItems
+                    // The guess itself was right or wrong about which route was live -- so the
+                    // actual route is the guess when correct, and its opposite when not.
+                    val actualWasDirect = if (correct) guessedDirect else !guessedDirect
+                    val actualLabel =
+                        getString(
+                            if (actualWasDirect) R.string.lbl_abx_route_direct else R.string.lbl_abx_route_fallback)
+                    val message =
+                        if (correct) getString(R.string.lbl_abx_correct, actualLabel)
+                        else getString(R.string.lbl_abx_incorrect, actualLabel)
+                    Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                }
+            .show()
+    }
+
+    private fun formatSampleRate(sampleRateHz: Int): String {
+        val khz = sampleRateHz / 1000f
+        val rate = if (khz == khz.toInt().toFloat()) "${khz.toInt()}" else "$khz"
+        return "${rate}kHz"
     }
 
     private fun updatePosition(positionDs: Long) {
@@ -292,6 +415,43 @@ class PlaybackPanelFragment :
     private fun updatePlaying(isPlaying: Boolean) {
         requireBinding().playbackPlayPause.isChecked = isPlaying
         requireBinding().playbackSeekBar?.setWaveEnabled(isPlaying)
+    }
+
+    private var dacActivatingSpin: ObjectAnimator? = null
+
+    /**
+     * See [UsbAudioManager.blockPlayback]'s doc comment: disables this button and swaps its icon
+     * for a spinner while a USB DAC activation this control would otherwise race is in flight,
+     * instead of letting a tap start playback that might land on HAL purely due to timing.
+     *
+     * Spins the button *view* itself via [ObjectAnimator] rather than animating the icon drawable
+     * -- confirmed, reproduced: an [AnimatedVectorDrawable][android.graphics.drawable
+     * .AnimatedVectorDrawable] set as this button's icon never actually rotated, even after
+     * unwrapping [MaterialButton][com.google.android.material.button.MaterialButton]'s tint-aware
+     * wrapper (this button's style chain resolves an iconTint via
+     * Widget.Material3Expressive.Button.IconButton.Tonal) to reach the real instance and start it
+     * directly -- it just sat on its first frame regardless. [View.ROTATION] has no dependency on
+     * any of that; it's a plain property of the view, not the icon.
+     */
+    private fun updateBlockPlayback(blocked: Boolean) {
+        val button = requireBinding().playbackPlayPause
+        button.isEnabled = !blocked
+        if (blocked) {
+            button.setIconResource(R.drawable.ic_dac_activating_24)
+            dacActivatingSpin?.cancel()
+            dacActivatingSpin =
+                ObjectAnimator.ofFloat(button, View.ROTATION, 0f, 360f).apply {
+                    duration = 900
+                    repeatCount = ObjectAnimator.INFINITE
+                    interpolator = LinearInterpolator()
+                    start()
+                }
+        } else {
+            dacActivatingSpin?.cancel()
+            dacActivatingSpin = null
+            button.rotation = 0f
+            button.setIconResource(R.drawable.sel_playing_state_24)
+        }
     }
 
     private fun updateShuffled(isShuffled: Boolean) {

@@ -30,6 +30,28 @@ Auxio is a local music player with a fast, reliable UI/UX without the many usele
 
 **The default branch is the development version of the repository. For a stable version, see the master branch.**
 
+## This Fork: Native USB DAC Support
+
+This fork ([ostrichbat2k/Auxio](https://github.com/ostrichbat2k/Auxio)) adds direct, bit-perfect USB DAC
+output on top of upstream Auxio -- claiming the USB Audio Class interface itself (UAC 1.0/2.0/3.0) rather
+than going through Android's normal audio HAL, so a supported track reaches the DAC byte-for-byte
+unaltered, with no OS resampling or internal float mixing in the way.
+
+- **Bit-perfect mode** -- only plays a track directly when it can be sent unchanged (exact sample rate
+  match, no digital attenuation); anything else falls back to normal Android audio output automatically.
+- **Hardware volume control** -- drives the DAC's own Feature Unit directly, with loudness kept
+  continuous across route switches so falling back mid-session doesn't jump the perceived level.
+- **Capabilities inspector** -- a live view of the connected DAC's UAC topology: supported formats,
+  clock source, mixer/selector units, power domain state.
+- **Blind ABX listening test** -- a built-in, randomized, score-tracked test to check whether
+  bit-perfect output is actually audible on your own ears and gear, not just known to be bit-exact.
+
+Built on [libusbdac](https://github.com/ostrichbat2k/libusbdac), a standalone library consumed here as a
+git submodule.
+
+This fork's USB DAC work was developed with substantial AI assistance (Claude Code), including
+implementation, debugging, and the Android/AOSP audio-internals research behind it.
+
 ## Screenshots
 
 <p align="center">

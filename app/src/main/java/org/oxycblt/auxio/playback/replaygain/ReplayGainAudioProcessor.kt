@@ -167,24 +167,40 @@ constructor(
 
     // --- AUDIO PROCESSOR IMPLEMENTATION ---
 
+    // Set by onConfigure, used by queueInput -- was hardcoded to exactly 2 (16-bit), which meant
+    // this processor -- sitting in the AudioProcessor chain ahead of *every* output path,
+    // DAC or speaker -- rejected anything else outright (AudioProcessor.UnhandledAudioFormatException),
+    // forcing the renderer to decode down to 16-bit even for a genuinely 24-bit source so this
+    // processor could accept it at all. Confirmed, reproduced: a real 24-bit/96kHz FLAC
+    // (ffprobe: bits_per_raw_sample=24) was still seen by UsbAudioOutputProvider as a 16-bit
+    // track, meaning no 24-bit content ever actually got bit-perfect treatment through this
+    // app, independent of USB vs speaker. Now handles 16/24/32-bit PCM (2/3/4 bytes), all signed
+    // little-endian, which covers every encoding UsbAudioOutputProvider's own encodingFor() maps
+    // a device format to.
+    private var bytesPerSample = 2
+
     override fun onConfigure(
         inputAudioFormat: AudioProcessor.AudioFormat
     ): AudioProcessor.AudioFormat {
-        if (inputAudioFormat.encoding == C.ENCODING_PCM_16BIT) {
-            // AudioProcessor is only provided 16-bit PCM audio data, so that's the only
-            // encoding we need to check for.
-            // TODO: Convert to a low-level audio processor capable of handling any kind of
-            //  PCM data, once ExoPlayer can support it.
-            return inputAudioFormat
+        val bytes =
+            when (inputAudioFormat.encoding) {
+                C.ENCODING_PCM_16BIT -> 2
+                C.ENCODING_PCM_24BIT -> 3
+                C.ENCODING_PCM_32BIT -> 4
+                else -> null
+            }
+        if (bytes == null) {
+            throw AudioProcessor.UnhandledAudioFormatException(inputAudioFormat)
         }
-
-        throw AudioProcessor.UnhandledAudioFormatException(inputAudioFormat)
+        bytesPerSample = bytes
+        return inputAudioFormat
     }
 
     override fun queueInput(inputBuffer: ByteBuffer) {
         val pos = inputBuffer.position()
         val limit = inputBuffer.limit()
         val buffer = replaceOutputBuffer(limit - pos)
+        val bytes = bytesPerSample
 
         if (volume == 1f) {
             // Nothing to adjust, just copy the audio data.
@@ -192,20 +208,16 @@ constructor(
             // the adjustment can change during playback I'm largely forced to do this.
             buffer.put(inputBuffer.slice())
         } else {
-            for (i in pos until limit step 2) {
-                // 16-bit PCM audio, deserialize a little-endian short.
-                var sample = inputBuffer.getLeShort(i)
-                // Ensure we clamp the values to the minimum and maximum values possible
-                // for the encoding. This prevents issues where samples amplified beyond
-                // 1 << 16 will end up becoming truncated during the conversion to a short,
-                // resulting in popping.
-                sample =
-                    (sample * volume)
-                        .toInt()
-                        .coerceAtLeast(Short.MIN_VALUE.toInt())
-                        .coerceAtMost(Short.MAX_VALUE.toInt())
-                        .toShort()
-                buffer.putLeShort(sample)
+            // Full-scale range for whatever bit depth this is, e.g. +-32768 for 16-bit,
+            // +-8388608 for 24-bit -- same clamping purpose as before (prevents a sample
+            // amplified past full scale from wrapping around on truncation and popping), just
+            // generalized instead of hardcoded to Short's range.
+            val maxValue = (1L shl (bytes * 8 - 1)) - 1
+            val minValue = -(1L shl (bytes * 8 - 1))
+            for (i in pos until limit step bytes) {
+                var sample = inputBuffer.getLeSigned(i, bytes)
+                sample = (sample * volume).toLong().coerceIn(minValue, maxValue)
+                buffer.putLeSigned(sample, bytes)
             }
         }
 
@@ -213,21 +225,21 @@ constructor(
         buffer.flip()
     }
 
-    /**
-     * Always read a little-endian [Short] from the [ByteBuffer] at the given index.
-     *
-     * @param at The index to read the [Short] from.
-     */
-    private fun ByteBuffer.getLeShort(at: Int) =
-        get(at + 1).toInt().shl(8).or(get(at).toInt().and(0xFF)).toShort()
+    /** Reads a little-endian signed integer of [bytes] length from the [ByteBuffer] at [at]. */
+    private fun ByteBuffer.getLeSigned(at: Int, bytes: Int): Long {
+        var value = 0L
+        for (b in 0 until bytes) {
+            value = value or ((get(at + b).toLong() and 0xFF) shl (8 * b))
+        }
+        // Sign-extend from `bytes * 8` bits up to a full Long.
+        val shift = 64 - bytes * 8
+        return (value shl shift) shr shift
+    }
 
-    /**
-     * Always write a little-endian [Short] at the end of the [ByteBuffer].
-     *
-     * @param short The [Short] to write.
-     */
-    private fun ByteBuffer.putLeShort(short: Short) {
-        put(short.toByte())
-        put(short.toInt().shr(8).toByte())
+    /** Writes a little-endian signed integer of [bytes] length to the end of the [ByteBuffer]. */
+    private fun ByteBuffer.putLeSigned(value: Long, bytes: Int) {
+        for (b in 0 until bytes) {
+            put(((value shr (8 * b)) and 0xFF).toByte())
+        }
     }
 }

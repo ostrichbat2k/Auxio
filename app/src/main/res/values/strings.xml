@@ -20,6 +20,14 @@
     <string name="lbl_songs">Songs</string>
     <string name="lbl_song">Song</string>
     <string name="lbl_all_songs">All songs</string>
+    <string name="lbl_abx_prompt">ABX test -- %1$d/%2$d correct</string>
+    <string name="lbl_abx_dialog_title">What did you just hear?</string>
+    <string name="lbl_abx_guess_direct">USB DAC (bit-perfect)</string>
+    <string name="lbl_abx_guess_fallback">Normal Android audio</string>
+    <string name="lbl_abx_correct">Correct! It was %s.</string>
+    <string name="lbl_abx_incorrect">Incorrect -- it was actually %s.</string>
+    <string name="lbl_abx_route_direct">the USB DAC (bit-perfect)</string>
+    <string name="lbl_abx_route_fallback">normal Android audio</string>
 
     <string name="lbl_albums">Albums</string>
     <string name="lbl_album">Album</string>
@@ -297,6 +305,36 @@
 
     <string name="set_audio">Audio</string>
     <string name="set_audio_desc">Configure sound and playback behavior</string>
+
+    <string name="set_usb">USB Audio</string>
+    <string name="set_usb_desc">Direct USB DAC status and activation log</string>
+    <string name="set_usb_enabled">Enable direct USB DAC output</string>
+    <string name="set_usb_enabled_desc">Experimental. When on, Auxio takes over a connected USB DAC directly instead of using Android\'s normal audio output. Off by default -- try it, but expect rough edges.</string>
+    <string name="set_usb_bit_perfect">Bit-perfect mode</string>
+    <string name="set_usb_bit_perfect_desc">Only use the DAC for playback when a track can be sent to it unchanged -- exact sample rate match, no digital volume attenuation. Tracks that don\'t qualify play through normal Android audio output instead.</string>
+    <string name="set_usb_bit_perfect_not_capable">Not available -- this device\'s output volume range couldn\'t be confirmed, so Auxio can\'t guarantee unity gain (no digital attenuation)</string>
+    <string name="set_usb_abx_test">ABX listening test</string>
+    <string name="set_usb_abx_test_desc">While on, Auxio secretly randomizes bit-perfect vs normal output per track and hides which one is active on the Now Playing screen -- each time the track changes, you\'ll be asked to guess, blind, which one you just heard.</string>
+    <string name="set_usb_device">Device</string>
+    <string name="set_usb_device_none">No USB audio device attached</string>
+    <string name="set_usb_retry">Retry activation</string>
+    <string name="set_usb_retry_desc">Re-run DAC setup for the attached device</string>
+    <string name="set_usb_capabilities">Capabilities</string>
+    <string name="set_usb_capabilities_desc">What Auxio found on this device, explained</string>
+    <string name="set_usb_capabilities_none">Nothing discovered yet -- activates once a USB DAC is attached and permitted</string>
+    <string name="set_usb_capabilities_device_category">Device</string>
+    <string name="set_usb_capabilities_interfaces_category">USB interfaces</string>
+    <string name="set_usb_capabilities_topology_category">Audio routing</string>
+    <string name="set_usb_capabilities_power_category">Power</string>
+    <string name="set_usb_capabilities_formats_category">Formats</string>
+    <string name="set_usb_controls_category">Controls</string>
+    <string name="set_usb_controls_none">No active USB DAC session -- controls will appear here once one activates</string>
+    <string name="set_usb_format">Format</string>
+    <string name="set_usb_mute">Mute</string>
+    <string name="set_usb_volume">Volume (1/256 dB)</string>
+    <string name="set_usb_mixer_gain">Mixer gain in %1$d → out %2$d (1/256 dB)</string>
+    <string name="set_usb_log_category">Activation log</string>
+    <string name="set_usb_log_empty">Nothing logged yet -- plug in a USB DAC or tap Retry activation</string>
     <string name="set_playback">Playback</string>
     <string name="set_headset_autoplay">Headset autoplay</string>
     <string name="set_headset_autoplay_desc">Always start playing when a headset is connected (may not work on all devices)</string>

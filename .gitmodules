@@ -6,3 +6,6 @@
 	path = musikr/src/main/cpp/taglib
 	url = https://github.com/taglib/taglib.git
 	tag = ee1931b
+[submodule "libusbdac"]
+	path = libusbdac
+	url = https://github.com/ostrichbat2k/libusbdac.git

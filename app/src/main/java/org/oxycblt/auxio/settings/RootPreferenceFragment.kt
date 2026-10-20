@@ -82,6 +82,10 @@ class RootPreferenceFragment : BasePreferenceFragment(R.xml.preferences_root) {
                 L.d("Navigating to audio preferences")
                 findNavController().navigateSafe(RootPreferenceFragmentDirections.audioPeferences())
             }
+            getString(R.string.set_key_usb) -> {
+                L.d("Navigating to USB preferences")
+                findNavController().navigateSafe(RootPreferenceFragmentDirections.usbPreferences())
+            }
             getString(R.string.set_key_reindex) -> musicModel.refresh()
             getString(R.string.set_key_rescan) -> musicModel.rescan()
             else -> return super.onPreferenceTreeClick(preference)

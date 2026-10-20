@@ -73,6 +73,14 @@
             android:fallbackLineSpacing="false"
             tools:text="Album Name" />
 
+        <TextView
+            android:id="@+id/playback_usb_status"
+            style="@style/Widget.Auxio.TextView.Secondary.Marquee"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fallbackLineSpacing="false"
+            tools:text="USB · FLAC · 24-bit · 1411 kbps · 96kHz" />
+
     </LinearLayout>
 
     <org.oxycblt.auxio.ui.RippleFixMaterialButton
