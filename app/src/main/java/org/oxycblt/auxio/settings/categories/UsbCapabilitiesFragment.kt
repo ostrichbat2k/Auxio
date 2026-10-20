@@ -31,6 +31,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.oxycblt.auxio.R
 import org.oxycblt.auxio.settings.BasePreferenceFragment
+import org.ostrichbat2k.usbdac.UacNonPcmFormat
 import org.ostrichbat2k.usbdac.UacStreamFormat
 import org.ostrichbat2k.usbdac.UsbAudioController
 import org.ostrichbat2k.usbdac.UsbAudioManager
@@ -69,11 +70,14 @@ class UsbCapabilitiesFragment : BasePreferenceFragment(R.xml.preferences_usb_cap
             findPreference<PreferenceCategory>(getString(R.string.set_key_usb_capabilities_power_category))
         val formatsCategory =
             findPreference<PreferenceCategory>(getString(R.string.set_key_usb_capabilities_formats_category))
+        val nonPcmCategory =
+            findPreference<PreferenceCategory>(getString(R.string.set_key_usb_capabilities_nonpcm_category))
         deviceCategory?.removeAll()
         interfacesCategory?.removeAll()
         topologyCategory?.removeAll()
         powerCategory?.removeAll()
         formatsCategory?.removeAll()
+        nonPcmCategory?.removeAll()
 
         if (capabilities == null) {
             deviceCategory?.addPreference(info(getString(R.string.set_usb_capabilities_none)))
@@ -313,6 +317,21 @@ class UsbCapabilitiesFragment : BasePreferenceFragment(R.xml.preferences_usb_cap
                         summary = formatSummary(format)))
             }
         }
+
+        nonPcmCategory?.apply {
+            if (topology.nonPcmFormats.isEmpty()) {
+                addPreference(
+                    info(
+                        "None found on this device -- every alt setting it declares is ordinary PCM."))
+            }
+            for ((index, format) in topology.nonPcmFormats.withIndex()) {
+                addPreference(
+                    info(
+                        label = "Alt setting ${format.alternateSetting}",
+                        value = nonPcmFormatValue(format),
+                        summary = nonPcmFormatSummary(format)))
+            }
+        }
     }
 
     /** A short label for one of [UsbAudioController]'s PD_STATE_* constants, or "unknown". */
@@ -439,6 +458,30 @@ class UsbCapabilitiesFragment : BasePreferenceFragment(R.xml.preferences_usb_cap
         return "Alternate setting ${format.alternateSetting} · ${format.subslotSize}-byte " +
             "samples · sent over endpoint 0x${"%02x".format(format.endpointAddress)} in packets " +
             "up to ${format.maxPacketSize} bytes · $syncNote.$rateNote"
+    }
+
+    private fun nonPcmFormatValue(format: UacNonPcmFormat): String =
+        if (format.isRawData) "Raw bitstream (e.g. DSD)" else "Non-PCM (type undetermined)"
+
+    /**
+     * Explains why this alt setting shows up here instead of under "Formats" above -- unlike
+     * every PCM format there, this one declares the exact same byte layout as an ordinary PCM
+     * alt setting (same bit depth/subslot size, same endpoint) but a different meaning for those
+     * bytes, which only its bmFormats field reveals. Auxio never selects it for playback.
+     */
+    private fun nonPcmFormatSummary(format: UacNonPcmFormat): String {
+        val kindNote =
+            if (format.isRawData) {
+                "Its bmFormats field sets the \"raw data\" bit -- the real-world convention a " +
+                    "device uses to carry DSD (or another non-PCM bitstream) disguised inside " +
+                    "what otherwise looks like an ordinary PCM alt setting."
+            } else {
+                "Its bmFormats field doesn't declare the PCM bit, but also isn't the specific " +
+                    "\"raw data\" bit Auxio recognizes as DSD -- likely a genuinely compressed " +
+                    "format (e.g. MPEG, AC-3) this parser doesn't otherwise identify."
+            }
+        return "Sent over endpoint 0x${"%02x".format(format.endpointAddress)} in packets up to " +
+            "${format.maxPacketSize} bytes. $kindNote"
     }
 
     /** A read-only "[label]: [value]" row with an explanatory [summary] underneath. */

@@ -18,6 +18,7 @@
     <string name="set_key_usb_capabilities_topology_category" translatable="false">auxio_usb_capabilities_topology_category</string>
     <string name="set_key_usb_capabilities_power_category" translatable="false">auxio_usb_capabilities_power_category</string>
     <string name="set_key_usb_capabilities_formats_category" translatable="false">auxio_usb_capabilities_formats_category</string>
+    <string name="set_key_usb_capabilities_nonpcm_category" translatable="false">auxio_usb_capabilities_nonpcm_category</string>
     <string name="set_key_usb_controls_category" translatable="false">auxio_usb_controls_category</string>
     <string name="set_key_usb_log_category" translatable="false">auxio_usb_log_category</string>
     <string name="set_key_usb_format" translatable="false">auxio_usb_format</string>

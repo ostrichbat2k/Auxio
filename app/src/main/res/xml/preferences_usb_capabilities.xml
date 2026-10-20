@@ -23,4 +23,8 @@
         app:key="@string/set_key_usb_capabilities_formats_category"
         app:title="@string/set_usb_capabilities_formats_category" />
 
+    <PreferenceCategory
+        app:key="@string/set_key_usb_capabilities_nonpcm_category"
+        app:title="@string/set_usb_capabilities_nonpcm_category" />
+
 </PreferenceScreen>
