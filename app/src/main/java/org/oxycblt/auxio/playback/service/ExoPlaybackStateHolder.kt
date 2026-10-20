@@ -92,7 +92,8 @@ class ExoPlaybackStateHolder(
     Player.Listener,
     MusicRepository.UpdateListener,
     PlaybackSettings.Listener,
-    ImageSettings.Listener {
+    ImageSettings.Listener,
+    UsbDacPreferences.Listener {
     private val saveJob = Job()
     private val saveScope = CoroutineScope(Dispatchers.IO + saveJob)
     private val restoreScope = CoroutineScope(Dispatchers.IO + saveJob)
@@ -114,6 +115,7 @@ class ExoPlaybackStateHolder(
         replayGainProcessor.attach()
         playbackSettings.registerListener(this)
         imageSettings.registerListener(this)
+        usbSettings.registerListener(this)
         restoreScope.launch { forceReconfigureOnDacStateChange() }
     }
 
@@ -215,6 +217,7 @@ class ExoPlaybackStateHolder(
         replayGainProcessor.release()
         imageSettings.unregisterListener(this)
         playbackSettings.unregisterListener(this)
+        usbSettings.unregisterListener(this)
         player.release()
     }
 
@@ -384,6 +387,26 @@ class ExoPlaybackStateHolder(
                 usbAudioManager.awaitActivation()
                 withContext(Dispatchers.Main) { player.playWhenReady = true }
             }
+    }
+
+    /**
+     * [UsbDacPreferences.Listener] callback: flipping "Enable USB DAC output" or "Bit-perfect
+     * mode" mid-track has no path to re-resolve the current track's route at all -- unlike the
+     * DAC appearing/disappearing (see [forceReconfigureOnDacStateChange] and
+     * [RoutingAudioSink.current]'s self-heal), nothing here ever changes [UsbAudioManager]'s own
+     * state, so there's no signal to hook a live reroute onto. Rather than live-reroute the
+     * current track (already tried twice on the library side and reverted both times -- see
+     * libusbdac's `work-pending-fixes-and-abx` history -- including once because it left a stale,
+     * unflushed sink producing silence while the UI said "playing"), just pause: the user's next
+     * tap re-enters [playing] fresh, which already does a clean activation-await before resolving
+     * the route.
+     */
+    override fun onUsbEnabledChanged() {
+        if (desiredPlaying) playbackManager.playing(false)
+    }
+
+    override fun onBitPerfectModeChanged() {
+        if (desiredPlaying) playbackManager.playing(false)
     }
 
     override fun seekTo(positionMs: Long) {
