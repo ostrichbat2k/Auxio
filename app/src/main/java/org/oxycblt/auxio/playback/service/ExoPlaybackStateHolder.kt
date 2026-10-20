@@ -97,6 +97,11 @@ class ExoPlaybackStateHolder(
     private val saveScope = CoroutineScope(Dispatchers.IO + saveJob)
     private val restoreScope = CoroutineScope(Dispatchers.IO + saveJob)
     private var currentSaveJob: Job? = null
+    private var pendingPlayJob: Job? = null
+    // The user's (or any other playing() caller's) latest actual intent, independent of whatever
+    // player.playWhenReady happens to be mid-reconfigure -- see forceReconfigureOnDacStateChange's
+    // own doc comment on why its final step reads this instead of a stale snapshot.
+    @Volatile private var desiredPlaying = false
     private var openAudioEffectSession = false
 
     var sessionOngoing = false
@@ -154,7 +159,6 @@ class ExoPlaybackStateHolder(
                 if (!shouldForce) return@collect
                 withContext(Dispatchers.Main) {
                     val position = player.currentPosition
-                    val wasPlaying = player.isPlaying
                     // Silence immediately -- confirmed, reproduced: setting playWhenReady back
                     // right after prepare() still let HAL audibly keep playing for a bit while
                     // the reload/reconfigure was still in flight underneath, instead of cutting
@@ -171,7 +175,16 @@ class ExoPlaybackStateHolder(
                     player.seekTo(position)
                     player.prepare()
                     awaitReady()
-                    player.playWhenReady = wasPlaying
+                    // Not a `player.isPlaying` snapshot taken before this block started -- confirmed,
+                    // reproduced: a replug-then-play landing while this very reconfigure is what's
+                    // completing the DAC activation that press is waiting on (see playing()'s own
+                    // doc comment) snapshotted false here *before* that press's own coroutine had
+                    // set playWhenReady, then stomped its `true` back to `false` moments later,
+                    // right after real streaming had already started -- looked like the first press
+                    // did nothing. desiredPlaying is the one place that always holds the user's
+                    // latest actual intent regardless of which of this function's or playing()'s own
+                    // coroutine happens to finish last.
+                    player.playWhenReady = desiredPlaying
                 }
             }
     }
@@ -329,8 +342,48 @@ class ExoPlaybackStateHolder(
         return true
     }
 
+    /**
+     * Confirmed, reproduced: letting this set [Player.playWhenReady] immediately, as it used to,
+     * meant a replug-then-play racing a still-in-flight [UsbAudioManager] activation hit
+     * [RoutingAudioSink.current]'s own liveness re-check -- called on every single
+     * [RoutingAudioSink.getCurrentPositionUs]/[RoutingAudioSink.handleBuffer] from the render
+     * thread, many times a second -- which falls through to [UsbAudioManager.resolveActiveSink]'s
+     * `runBlocking { awaitActivation() }` fallback on every one of those calls for as long as
+     * activation is still running. Repeatedly stalling the render thread like that for the full
+     * ~1-2s a DAC reactivation takes let [player]'s own position estimate run ahead of real time
+     * during the stall (nothing from the blocked renderer was there to correct it) -- by
+     * measured, reproduced numbers, the next [Player.getCurrentPosition] read after a stall like
+     * that came back ~6s ahead of only ~1.4s of real elapsed time. [forceReconfigureOnDacStateChange]
+     * then captured and [Player.seekTo]'d that already-corrupted value, permanently skipping
+     * however much of the track the stall's error happened to add.
+     *
+     * Awaiting activation *before* ever touching [Player.playWhenReady] -- off the render thread
+     * entirely, same [UsbAudioManager.triggerActivation]/[UsbAudioManager.awaitActivation] pair
+     * the cold-launch restore path already uses -- means [UsbAudioManager.activeSink] is already
+     * resolved by the time the renderer asks, so [RoutingAudioSink.current]'s liveness check
+     * resolves instantly instead of blocking. [UsbAudioManager.blockPlayback] (already wired to
+     * the play/pause button's disabled/spinner state) covers the user-visible side of the wait for
+     * free -- nothing new needed there. [resolveActiveSink]'s own blocking fallback is left in
+     * place, not removed: it's still the only thing protecting a *different*, already-fixed race
+     * (a cold-launch state restore's [RoutingAudioSink.configure] call landing before that
+     * restore's own upfront [UsbAudioManager.awaitActivation] call here would have run).
+     *
+     * [pendingPlayJob] exists so a rapid play/pause/play doesn't let a stale await from the first
+     * tap land [Player.playWhenReady] back to `true` after a later tap explicitly paused.
+     */
     override fun playing(playing: Boolean) {
-        player.playWhenReady = playing
+        desiredPlaying = playing
+        pendingPlayJob?.cancel()
+        if (!playing) {
+            player.playWhenReady = false
+            return
+        }
+        pendingPlayJob =
+            restoreScope.launch {
+                usbAudioManager.triggerActivation()
+                usbAudioManager.awaitActivation()
+                withContext(Dispatchers.Main) { player.playWhenReady = true }
+            }
     }
 
     override fun seekTo(positionMs: Long) {
