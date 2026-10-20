@@ -898,6 +898,18 @@ class ExoPlaybackStateHolder(
                             usbAudioManager,
                             DefaultAudioSink.Builder(context)
                                 .setAudioProcessors(arrayOf(replayGainProcessor))
+                                // Off by default in DefaultAudioSink -- without this,
+                                // getFormatSupport() silently rewrites every float-PCM query
+                                // back to 16-bit before UsbAudioOutputProvider ever sees it,
+                                // which is exactly what made FfmpegAudioRenderer
+                                // .shouldOutputFloat() (and MediaCodecAudioRenderer's own
+                                // equivalent check just below) always choose 16-bit regardless
+                                // of the DAC's real capability -- confirmed, reproduced: a
+                                // genuinely 24-bit/96kHz FLAC (ffprobe:
+                                // bits_per_raw_sample=24) still got decoded to 16-bit PCM with
+                                // this flag left at its default. See DefaultAudioSink
+                                // .getFormatSupport()'s own shouldUseFloatOutput() check.
+                                .setEnableFloatOutput(true)
                                 .build()),
                     ),
                     MediaCodecAudioRenderer(
@@ -909,6 +921,8 @@ class ExoPlaybackStateHolder(
                             usbAudioManager,
                             DefaultAudioSink.Builder(context)
                                 .setAudioProcessors(arrayOf(replayGainProcessor))
+                                // See the matching FfmpegAudioRenderer sink above for why.
+                                .setEnableFloatOutput(true)
                                 .build()),
                     ),
                 )
