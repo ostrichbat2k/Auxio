@@ -18,10 +18,10 @@
  
 package org.oxycblt.auxio.playback
 
+import android.animation.ObjectAnimator
 import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.Intent
-import android.graphics.drawable.Animatable
 import android.media.audiofx.AudioEffect
 import android.os.Build
 import android.os.Bundle
@@ -29,6 +29,7 @@ import android.widget.Toast
 import android.view.LayoutInflater
 import android.view.MenuItem
 import android.view.View
+import android.view.animation.LinearInterpolator
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.widget.Toolbar
@@ -45,6 +46,7 @@ import org.oxycblt.auxio.detail.DetailViewModel
 import org.oxycblt.auxio.list.ListViewModel
 import org.oxycblt.auxio.music.resolve
 import org.oxycblt.auxio.music.resolveNames
+import org.oxycblt.auxio.music.resolveShort
 import org.oxycblt.auxio.playback.queue.QueueViewModel
 import org.oxycblt.auxio.playback.state.RepeatMode
 import org.oxycblt.auxio.playback.ui.StyledSeekBar
@@ -285,6 +287,13 @@ class PlaybackPanelFragment :
         binding.playbackArtist.text = song.artists.resolveNames(context)
         binding.playbackAlbum?.text = song.album.name.resolve(context)
         binding.playbackSeekBar?.durationDs = song.durationMs.msToDs()
+        // playbackRoute/controlState (updateUsbStatus's own triggers) don't necessarily re-emit
+        // on every track change -- two consecutive HAL-fallback tracks report the exact same
+        // PlaybackRoute.Fallback value (always the fixed HAL output format, never the file's own),
+        // which a StateFlow conflates away as a no-op. The bitrate shown alongside it is per-track
+        // though, so it needs its own refresh right here, not just whenever route/controlState
+        // actually change.
+        updateUsbStatus(usbAudioManager.playbackRoute.value, usbAudioManager.controlState.value)
     }
 
     private fun updateParent(parent: MusicParent?) {
@@ -296,38 +305,51 @@ class PlaybackPanelFragment :
 
     /**
      * Shows exactly what [org.ostrichbat2k.usbdac.RoutingAudioSink] is doing with the current
-     * track, including its real decoded format either way -- hidden entirely when there's no DAC
-     * session at all ([controlState] null -- feature off, nothing plugged in) so this stays
-     * invisible to anyone not using the feature. Shown for [UsbAudioManager.PlaybackRoute
-     * .Fallback] too, not just [UsbAudioManager.PlaybackRoute.Direct], *while a session is live*,
-     * since that specifically means bit-perfect mode is on but this one track couldn't use it
-     * (e.g. an unsupported sample rate) -- the whole reason this exists is to make that silent,
-     * per-track fallback visible instead of looking like nothing happened.
+     * track, always visible (not just while a DAC session exists) since the current track's
+     * format/bitrate is real, file-derived info relevant to every user.
+     *
+     * Both [UsbAudioManager.PlaybackRoute.Direct] and [UsbAudioManager.PlaybackRoute.Fallback]
+     * carry the file's own real bit depth/sample rate (see [UsbAudioManager.PlaybackRoute
+     * .Fallback]'s own doc comment for why Fallback's fields mean this despite not being what HAL
+     * is actually doing), so both render the same five-segment layout here -- only the leading
+     * path label ("USB" vs. "HAL") differs. The container/codec label and bitrate are always the
+     * file's own, independent of route entirely -- a compressed source's bitrate has no bearing on
+     * the decoded PCM actually reaching either sink.
      */
     private fun updateUsbStatus(route: UsbAudioManager.PlaybackRoute, controlState: UsbControlState?) {
         val statusView = requireBinding().playbackUsbStatus
-        if (controlState == null) {
-            statusView.visibility = View.GONE
-            return
-        }
         statusView.visibility = View.VISIBLE
-        if (usbSettings.abxTestMode) {
-            // Deliberately never derived from `route` here -- format details (bit depth/rate)
-            // would leak which path is live just as plainly as the route name itself (e.g.
-            // Direct shows the file's real bit depth, Fallback always shows HAL's fixed rate).
+        if (usbSettings.abxTestMode && controlState != null) {
+            // Deliberately never derived from `route` here -- the path label itself (USB vs. HAL)
+            // would give away which route is live just as plainly as the format details would.
             // The guess prompt itself is triggered on track change (see updateAbxPendingGuess),
             // not from here -- this just reports the running score.
             val stats = usbAudioManager.abxStats.value
             statusView.text = getString(R.string.lbl_abx_prompt, stats.correct, stats.total)
             return
         }
+        val song = playbackModel.song.value
+        val formatLabel = song?.format?.resolveShort()
+        val bitrateLabel = song?.let { getString(R.string.fmt_bitrate, it.bitrateKbps) }
         statusView.text =
             when (route) {
-                is UsbAudioManager.PlaybackRoute.Direct -> "USB DAC · ${formatLabel(route.bitDepth, route.sampleRateHz, route.channels)}"
-                is UsbAudioManager.PlaybackRoute.Fallback -> "HAL · ${formatLabel(route.bitDepth, route.sampleRateHz, route.channels)}"
+                is UsbAudioManager.PlaybackRoute.Direct ->
+                    formatStatus("USB", formatLabel, route.bitDepth, route.sampleRateHz, bitrateLabel)
+                is UsbAudioManager.PlaybackRoute.Fallback ->
+                    formatStatus("HAL", formatLabel, route.bitDepth, route.sampleRateHz, bitrateLabel)
                 UsbAudioManager.PlaybackRoute.Switching -> "Switching audio output…"
             }
     }
+
+    private fun formatStatus(
+        pathLabel: String,
+        formatLabel: String?,
+        bitDepth: Int?,
+        sampleRateHz: Int,
+        bitrateLabel: String?,
+    ): String =
+        listOfNotNull(pathLabel, formatLabel, bitDepth?.let { "$it-bit" }, bitrateLabel, formatSampleRate(sampleRateHz))
+            .joinToString(" · ")
 
     /**
      * Fires on every track change while an ABX test is running (see
@@ -374,12 +396,10 @@ class PlaybackPanelFragment :
             .show()
     }
 
-    private fun formatLabel(bitDepth: Int?, sampleRateHz: Int, channels: Int): String {
-        val bits = bitDepth?.let { "$it-bit" } ?: "PCM"
+    private fun formatSampleRate(sampleRateHz: Int): String {
         val khz = sampleRateHz / 1000f
         val rate = if (khz == khz.toInt().toFloat()) "${khz.toInt()}" else "$khz"
-        val chLabel = if (channels == 2) "" else " · ${channels}ch"
-        return "$bits/${rate}kHz$chLabel"
+        return "${rate}kHz"
     }
 
     private fun updatePosition(positionDs: Long) {
@@ -397,18 +417,39 @@ class PlaybackPanelFragment :
         requireBinding().playbackSeekBar?.setWaveEnabled(isPlaying)
     }
 
+    private var dacActivatingSpin: ObjectAnimator? = null
+
     /**
      * See [UsbAudioManager.blockPlayback]'s doc comment: disables this button and swaps its icon
      * for a spinner while a USB DAC activation this control would otherwise race is in flight,
      * instead of letting a tap start playback that might land on HAL purely due to timing.
+     *
+     * Spins the button *view* itself via [ObjectAnimator] rather than animating the icon drawable
+     * -- confirmed, reproduced: an [AnimatedVectorDrawable][android.graphics.drawable
+     * .AnimatedVectorDrawable] set as this button's icon never actually rotated, even after
+     * unwrapping [MaterialButton][com.google.android.material.button.MaterialButton]'s tint-aware
+     * wrapper (this button's style chain resolves an iconTint via
+     * Widget.Material3Expressive.Button.IconButton.Tonal) to reach the real instance and start it
+     * directly -- it just sat on its first frame regardless. [View.ROTATION] has no dependency on
+     * any of that; it's a plain property of the view, not the icon.
      */
     private fun updateBlockPlayback(blocked: Boolean) {
         val button = requireBinding().playbackPlayPause
         button.isEnabled = !blocked
         if (blocked) {
-            button.setIconResource(R.drawable.avd_dac_activating_24)
-            (button.icon as? Animatable)?.start()
+            button.setIconResource(R.drawable.ic_dac_activating_24)
+            dacActivatingSpin?.cancel()
+            dacActivatingSpin =
+                ObjectAnimator.ofFloat(button, View.ROTATION, 0f, 360f).apply {
+                    duration = 900
+                    repeatCount = ObjectAnimator.INFINITE
+                    interpolator = LinearInterpolator()
+                    start()
+                }
         } else {
+            dacActivatingSpin?.cancel()
+            dacActivatingSpin = null
+            button.rotation = 0f
             button.setIconResource(R.drawable.sel_playing_state_24)
         }
     }

@@ -176,7 +176,7 @@ private constructor(
      * .setPlaybackToRemote] is the standard mechanism for exactly this (the same one a
      * Cast/Bluetooth-AVRCP-absolute-volume session uses) -- it hands volume key events to
      * [usbVolumeProvider] instead, which forwards them to the Feature Unit via
-     * [usbAudioManager]. [usbAudioManager.createAudioSink] is null unless
+     * [usbAudioManager]. [usbAudioManager.resolveActiveSink] is null unless
      * [UsbDacPreferences.bitPerfectMode] is on *and* the device's volume range was actually read back
      * successfully ([UsbAudioManager.isBitPerfectCapable]) -- the same condition
      * [org.ostrichbat2k.usbdac.RoutingAudioSink] uses to decide whether a track actually gets

@@ -69,9 +69,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:fallbackLineSpacing="false"
-            android:visibility="gone"
-            tools:text="USB DAC · 24-bit/96kHz"
-            tools:visibility="visible" />
+            tools:text="USB · FLAC · 24-bit · 1411 kbps · 96kHz" />
 
     </LinearLayout>
     <org.oxycblt.auxio.playback.ui.ForcedLTRFrameLayout

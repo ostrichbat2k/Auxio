@@ -264,7 +264,7 @@ class UsbPreferenceFragment : BasePreferenceFragment(R.xml.preferences_usb) {
     /**
      * Grays out the "Bit-perfect mode" switch with an explanation whenever
      * [UsbAudioManager.isBitPerfectCapable] says no -- toggling it would otherwise do nothing
-     * observable (createAudioSink already refuses to use USB output in that case), which reads as
+     * observable (resolveActiveSink already refuses to use USB output in that case), which reads as
      * a silent failure rather than the device genuinely not supporting it.
      */
     private fun updateBitPerfectAvailability(state: UsbControlState?) {

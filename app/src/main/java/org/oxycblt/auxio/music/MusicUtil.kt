@@ -171,3 +171,23 @@ fun Format.resolve(context: Context): String =
         is Format.Wav -> context.getString(R.string.cdc_wav)
         is Format.Unknown -> extension ?: context.getString(R.string.cdc_unknown)
     }
+
+/**
+ * A short acronym/extension (e.g. "FLAC", "MP3", "M4A") instead of [resolve]'s full technical
+ * name -- for compact spots like the Now Playing status row, where "Free Lossless Audio Codec
+ * (FLAC)" would overflow. These are acronyms, not prose, so unlike [resolve] they're not run
+ * through string resources for localization.
+ */
+fun Format.resolveShort(): String =
+    when (this) {
+        is Format.MPEG3 -> "MP3"
+        is Format.MPEG4 -> "M4A"
+        is Format.AAC -> "AAC"
+        is Format.ALAC -> "ALAC"
+        is Format.Ogg -> "OGG"
+        is Format.Opus -> "OPUS"
+        is Format.Vorbis -> "VORBIS"
+        is Format.FLAC -> "FLAC"
+        is Format.Wav -> "WAV"
+        is Format.Unknown -> extension ?: "?"
+    }

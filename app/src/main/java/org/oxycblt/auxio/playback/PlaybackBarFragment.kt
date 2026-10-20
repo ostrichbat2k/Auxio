@@ -18,9 +18,11 @@
  
 package org.oxycblt.auxio.playback
 
-import android.graphics.drawable.Animatable
+import android.animation.ObjectAnimator
 import android.os.Bundle
 import android.view.LayoutInflater
+import android.view.View
+import android.view.animation.LinearInterpolator
 import androidx.fragment.app.activityViewModels
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
@@ -111,18 +113,34 @@ class PlaybackBarFragment : ViewBindingFragment<FragmentPlaybackBarBinding>() {
         requireBinding().playbackPlayPause.isChecked = isPlaying
     }
 
+    private var dacActivatingSpin: ObjectAnimator? = null
+
     /**
      * See [UsbAudioManager.blockPlayback]'s doc comment: disables this button and swaps its icon
      * for a spinner while a USB DAC activation this control would otherwise race is in flight,
      * instead of letting a tap start playback that might land on HAL purely due to timing.
+     *
+     * See [org.oxycblt.auxio.playback.PlaybackPanelFragment.updateBlockPlayback]'s doc comment for
+     * why this spins the button view itself via [ObjectAnimator] rather than animating the icon
+     * drawable -- same button style, same confirmed failure either way.
      */
     private fun updateBlockPlayback(blocked: Boolean) {
         val button = requireBinding().playbackPlayPause
         button.isEnabled = !blocked
         if (blocked) {
-            button.setIconResource(R.drawable.avd_dac_activating_24)
-            (button.icon as? Animatable)?.start()
+            button.setIconResource(R.drawable.ic_dac_activating_24)
+            dacActivatingSpin?.cancel()
+            dacActivatingSpin =
+                ObjectAnimator.ofFloat(button, View.ROTATION, 0f, 360f).apply {
+                    duration = 900
+                    repeatCount = ObjectAnimator.INFINITE
+                    interpolator = LinearInterpolator()
+                    start()
+                }
         } else {
+            dacActivatingSpin?.cancel()
+            dacActivatingSpin = null
+            button.rotation = 0f
             button.setIconResource(R.drawable.sel_playing_state_24)
         }
     }
