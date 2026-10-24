@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Arm Memory Tagging Extension (MTE), debug builds only. Catches native heap bugs
+         (use-after-free, buffer overflow) on an MTE-capable device (e.g. Pixel 8+) with a
+         precise fault report. See https://developer.android.com/ndk/guides/arm-mte and
+         libusbdac/src/main/cpp/CMakeLists.txt for the matching native stack-tagging flags. -->
+    <application android:memtagMode="sync" tools:replace="android:memtagMode"/>
+</manifest>

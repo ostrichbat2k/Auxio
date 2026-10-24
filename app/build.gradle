@@ -180,4 +180,18 @@ dependencies {
 
     // Fuzzy search
     implementation 'org.apache.commons:commons-text:1.15.0'
+
+    // Instrumented UI tests (drive the real running app via UiAutomator -- see
+    // testutil/AuxioUiAutomator.kt for why Espresso's onView() isn't used here)
+    androidTestImplementation 'androidx.test.ext:junit:1.3.0'
+    androidTestImplementation 'androidx.test.uiautomator:uiautomator:2.3.0'
+    androidTestImplementation 'androidx.test:runner:1.7.0'
+
+    // JVM unit tests (ViewModels/business logic), versions matched to libusbdac/musikr's own
+    // testImplementation blocks for consistency
+    testImplementation "junit:junit:4.13.2"
+    testImplementation "io.mockk:mockk:1.14.11"
+    testImplementation 'androidx.test:core-ktx:1.7.0'
+    testImplementation "org.jetbrains.kotlinx:kotlinx-coroutines-test:$kotlin_coroutines_version"
+    testImplementation "app.cash.turbine:turbine:1.2.0"
 }
