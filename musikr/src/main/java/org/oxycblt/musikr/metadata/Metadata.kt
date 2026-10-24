@@ -58,4 +58,8 @@ data class Properties(
     val durationMs: Long,
     val bitrateKbps: Int,
     val sampleRateHz: Int,
+    // 0 for a format with no fixed per-sample depth (e.g. a lossy codec) -- see
+    // JMetadataBuilder.cpp's bitsPerSampleOf, the same sentinel TagLib itself already uses for an
+    // unknown bitrate/sampleRate.
+    val bitDepth: Int,
 )

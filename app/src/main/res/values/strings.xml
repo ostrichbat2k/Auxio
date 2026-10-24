@@ -151,6 +151,7 @@
     <string name="lbl_size">Size</string>
     <string name="lbl_bitrate">Bit rate</string>
     <string name="lbl_sample_rate">Sample rate</string>
+    <string name="lbl_bit_depth">Bit depth</string>
     <string name="lbl_replaygain_track">ReplayGain track adjustment</string>
     <string name="lbl_replaygain_album">ReplayGain album adjustment</string>
 
@@ -514,6 +515,7 @@
     <string name="fmt_bitrate">%d kbps</string>
     <!-- Use your native country's abbreviation for hertz units. -->
     <string name="fmt_sample_rate">%d Hz</string>
+    <string name="fmt_bit_depth">%d-bit</string>
 
     <string name="fmt_indexing">Loading your music library… (%1$d/%2$d)</string>
     <string name="fmt_deletion_info">Delete %s? This cannot be undone.</string>

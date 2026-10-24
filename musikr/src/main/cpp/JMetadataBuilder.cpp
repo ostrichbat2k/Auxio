@@ -21,6 +21,9 @@
 #include "util.h"
 
 #include <taglib/mp4tag.h>
+#include <taglib/mp4properties.h>
+#include <taglib/flacproperties.h>
+#include <taglib/wavproperties.h>
 #include <taglib/textidentificationframe.h>
 #include <taglib/attachedpictureframe.h>
 
@@ -190,16 +193,34 @@ void JMetadataBuilder::setProperties(TagLib::AudioProperties *properties) {
     this->properties = properties;
 }
 
+// bitsPerSample() isn't on the base AudioProperties -- it's only meaningful for a handful of
+// (mostly lossless) formats, each of which declares its own. 0 means "not applicable", the same
+// sentinel TagLib itself already uses for an unknown bitrate()/sampleRate() on the base class.
+static int bitsPerSampleOf(TagLib::AudioProperties *properties) {
+    if (auto *flac = dynamic_cast<TagLib::FLAC::Properties*>(properties)) {
+        return flac->bitsPerSample();
+    }
+    if (auto *wav = dynamic_cast<TagLib::RIFF::WAV::Properties*>(properties)) {
+        return wav->bitsPerSample();
+    }
+    if (auto *mp4 = dynamic_cast<TagLib::MP4::Properties*>(properties)) {
+        // Only meaningful for ALAC; TagLib's own MP4::Properties::bitsPerSample() already
+        // returns 0 for AAC and other lossy codecs in the container.
+        return mp4->bitsPerSample();
+    }
+    return 0;
+}
+
 jobject JMetadataBuilder::build() {
     JClassRef jPropertiesClass { env, "org/oxycblt/musikr/metadata/Properties" };
     jmethodID jPropertiesInitMethod = jPropertiesClass.method("<init>",
-            "(Ljava/lang/String;JII)V");
+            "(Ljava/lang/String;JIII)V");
     JStringRef jMimeType { env, this->mimeType };
 
     JObjectRef jProperties { env, env->NewObject(*jPropertiesClass,
             jPropertiesInitMethod, *jMimeType,
             (jlong) properties->lengthInMilliseconds(), properties->bitrate(),
-            properties->sampleRate()) };
+            properties->sampleRate(), bitsPerSampleOf(properties)) };
 
     JClassRef jMetadataClass { env, "org/oxycblt/musikr/metadata/Metadata" };
     jmethodID jMetadataInitMethod = jMetadataClass.method("<init>",
