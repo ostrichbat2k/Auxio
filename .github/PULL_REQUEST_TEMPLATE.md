@@ -1,27 +1,27 @@
-<!-- Please fill out all this information. -->
+<!-- One PR per issue. PR title should match the issue title. -->
 
-#### What is it?
+Fixes #
+
+#### Type
 - [ ] Bugfix (user facing)
 - [ ] Feature (user facing)
 - [ ] Codebase improvement (dev facing)
 - [ ] Meta improvement to the project (dev facing)
 
-#### Description of changes
-<!-- Bullet points or free-form text -->
-- Do this
-- Fix that
-- Listen to music
+#### What changed
+<!-- Bullet points -->
 
-#### Fixes the following issues
-<!-- Also add any other links relevant to your change. -->
+#### Root cause / motivation
+<!-- For a fix: what was actually wrong, and why. For a feature: why it's needed. -->
 
-#### Any additional information
-<!-- Also add any information relevant to this PR. -->
+#### Verification
+<!-- How you confirmed this works: tests run, on-device checks, logs, etc. -->
 
 #### APK testing
-<!-- Please create a debug APK for your changes, if possible. -->
+<!-- Please attach a debug APK for your changes, if possible. -->
 debug.zip
 
 #### Due diligence
 - [ ] I have read the [Contribution Guidelines](https://github.com/OxygenCobalt/Auxio/blob/dev/.github/CONTRIBUTING.md).
 - [ ] I have read the [Why Are These Features Missing?](https://github.com/OxygenCobalt/Auxio/wiki/Why-Are-These-Features-Missing%3F) page.
+- [ ] Verified on a real device (if applicable)
