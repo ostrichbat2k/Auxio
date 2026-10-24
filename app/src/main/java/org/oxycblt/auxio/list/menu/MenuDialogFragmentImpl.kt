@@ -85,6 +85,7 @@ class SongMenuDialogFragment : MenuDialogFragment<Menu.ForSong>() {
             R.id.action_album_details -> detailModel.showAlbum(menu.song.album)
             R.id.action_share -> requireContext().share(menu.song)
             R.id.action_detail -> detailModel.showSong(menu.song)
+            R.id.action_delete -> musicModel.deleteSongs(listOf(menu.song))
             else -> error("Unexpected menu item selected $item")
         }
     }
@@ -381,6 +382,7 @@ class SelectionMenuDialogFragment : MenuDialogFragment<Menu.ForSelection>() {
             }
             R.id.action_playlist_add -> musicModel.addToPlaylist(menu.songs)
             R.id.action_share -> requireContext().share(menu.songs)
+            R.id.action_delete -> musicModel.deleteSongs(menu.songs)
             else -> error("Unexpected menu item selected $item")
         }
     }

@@ -286,6 +286,10 @@ class UsbPreferenceFragment : BasePreferenceFragment(R.xml.preferences_usb) {
             findNavController().navigateSafe(UsbPreferenceFragmentDirections.usbCapabilities())
             return true
         }
+        if (preference.key == getString(R.string.set_key_usb_pipeline)) {
+            findNavController().navigateSafe(UsbPreferenceFragmentDirections.usbPipeline())
+            return true
+        }
         return super.onPreferenceTreeClick(preference)
     }
 

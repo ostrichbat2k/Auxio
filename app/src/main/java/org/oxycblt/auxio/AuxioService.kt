@@ -19,6 +19,7 @@
 package org.oxycblt.auxio
 
 import android.annotation.SuppressLint
+import android.app.Notification
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
@@ -131,7 +132,7 @@ class AuxioService :
         val mediaNotification = playbackFragment.notification
         if (mediaNotification != null) {
             if (change == ForegroundListener.Change.MEDIA_SESSION) {
-                startForeground(mediaNotification.code, mediaNotification.build())
+                startForegroundSafely(mediaNotification.code, mediaNotification.build())
             }
             // Nothing changed, but don't show anything music related since we can always
             // index during playback.
@@ -139,13 +140,33 @@ class AuxioService :
         } else {
             musicFragment.createNotification {
                 if (it != null) {
-                    startForeground(it.code, it.build())
+                    startForegroundSafely(it.code, it.build())
                     isForeground = true
                 } else {
                     ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
                     isForeground = false
                 }
             }
+        }
+    }
+
+    /**
+     * Wraps [startForeground] to tolerate Android 12+ refusing the start outright (e.g. this
+     * service wasn't started from an allowed foreground-equivalent context) -- confirmed,
+     * reproduced: an auto-reindex triggered by a watched folder changing while the app was
+     * backgrounded threw [android.app.ForegroundServiceStartNotAllowedException] right here,
+     * and with nothing catching it, that propagated all the way up through the indexing
+     * listener chain and aborted the *entire* reindex job, not just this notification --
+     * silently defeating auto-refresh for the single most common real-world case it exists for
+     * (the app not being in the foreground when a file change is noticed). Failing to show this
+     * purely-informational notification should never be allowed to take down the actual
+     * indexing work it's merely describing.
+     */
+    private fun startForegroundSafely(id: Int, notification: Notification) {
+        try {
+            startForeground(id, notification)
+        } catch (e: Exception) {
+            Timber.w("Could not start foreground service: $e")
         }
     }
 

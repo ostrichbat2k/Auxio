@@ -102,6 +102,7 @@
     <string name="lbl_rename_playlist">Rename playlist</string>
     <string name="lbl_delete">Delete</string>
     <string name="lbl_confirm_delete_playlist">Delete playlist?</string>
+    <string name="lbl_confirm_delete_song">Delete from device?</string>
     <string name="lbl_edit">Edit</string>
 
     <!-- Search for music -->
@@ -211,6 +212,7 @@
     <string name="lng_playlist_exported">Playlist exported</string>
     <string name="lng_playlist_deleted">Playlist deleted</string>
     <string name="lng_playlist_added">Added to playlist</string>
+    <string name="lng_song_deleted">Deleted from device</string>
     <string name="lng_supporters_promo">Donate to the project to get your name added here!</string>
     <!-- As in music library -->
     <string name="lng_search_library">Search your library…</string>
@@ -321,12 +323,20 @@
     <string name="set_usb_retry_desc">Re-run DAC setup for the attached device</string>
     <string name="set_usb_capabilities">Capabilities</string>
     <string name="set_usb_capabilities_desc">What Auxio found on this device, explained</string>
+    <string name="set_usb_pipeline">Pipeline</string>
+    <string name="set_usb_pipeline_desc">Live view of data flowing from the file to the DAC</string>
+    <string name="set_usb_pipeline_stage_file">File</string>
+    <string name="set_usb_pipeline_stage_route">Route</string>
+    <string name="set_usb_pipeline_stage_buffer">Ring buffer</string>
+    <string name="set_usb_pipeline_stage_transfer">USB transfer</string>
+    <string name="set_usb_pipeline_stage_device">Device</string>
     <string name="set_usb_capabilities_none">Nothing discovered yet -- activates once a USB DAC is attached and permitted</string>
     <string name="set_usb_capabilities_device_category">Device</string>
     <string name="set_usb_capabilities_interfaces_category">USB interfaces</string>
     <string name="set_usb_capabilities_topology_category">Audio routing</string>
     <string name="set_usb_capabilities_power_category">Power</string>
     <string name="set_usb_capabilities_formats_category">Formats</string>
+    <string name="set_usb_capabilities_nonpcm_category">Other alt settings (not used for playback)</string>
     <string name="set_usb_controls_category">Controls</string>
     <string name="set_usb_controls_none">No active USB DAC session -- controls will appear here once one activates</string>
     <string name="set_usb_format">Format</string>
@@ -388,6 +398,7 @@
     <string name="err_share_too_large">This is too large to share</string>
     <string name="err_share_failed">Unable to share this</string>
     <string name="err_no_app">No app found that can handle this task</string>
+    <string name="err_delete_failed">Unable to delete this from the device</string>
     <!-- No folders in the "Music Folders" setting -->
     <string name="err_bad_location">This folder is not supported</string>
     <string name="lbl_no_folders">No folders</string>

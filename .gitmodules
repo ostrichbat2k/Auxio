@@ -1,6 +1,6 @@
 [submodule "media"]
 	path = media
-	url = https://github.com/OxygenCobalt/media.git
+	url = https://github.com/ostrichbat2k/media.git
 
 [submodule "musikr/src/main/cpp/taglib"]
 	path = musikr/src/main/cpp/taglib
