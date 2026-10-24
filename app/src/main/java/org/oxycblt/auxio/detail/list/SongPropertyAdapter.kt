@@ -83,6 +83,8 @@ data class SongProperty(@StringRes val name: Int, val value: Value) {
 
         data class SampleRate(val hz: Int) : Value
 
+        data class BitDepth(val bits: Int) : Value
+
         data class Decibels(val value: Float) : Value
     }
 }
@@ -144,6 +146,10 @@ class SongPropertyViewHolder private constructor(private val binding: ItemSongPr
             is SongProperty.Value.SampleRate -> {
                 val hz = property.value.hz
                 binding.propertyValue.setText(context.getString(R.string.fmt_sample_rate, hz))
+            }
+            is SongProperty.Value.BitDepth -> {
+                val bits = property.value.bits
+                binding.propertyValue.setText(context.getString(R.string.fmt_bit_depth, bits))
             }
             is SongProperty.Value.Decibels -> {
                 val value = property.value.value

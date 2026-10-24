@@ -295,6 +295,8 @@ interface Song : Music {
     val bitrateKbps: Int
     /** The sample rate of the audio file, in Hz. */
     val sampleRateHz: Int
+    /** The bit depth of the audio file, or 0 if it has no fixed per-sample depth (e.g. lossy). */
+    val bitDepth: Int
     /** The ReplayGain adjustment to apply during playback. */
     val replayGainAdjustment: ReplayGainAdjustment
     /**

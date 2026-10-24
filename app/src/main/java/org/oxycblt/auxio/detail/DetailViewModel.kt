@@ -528,6 +528,11 @@ constructor(
                     SongProperty.Value.SampleRate(song.sampleRateHz),
                 )
             )
+            // 0 means the format has no fixed per-sample depth (e.g. a lossy codec) -- see
+            // Song.bitDepth's own doc comment -- so there's nothing meaningful to show.
+            song.bitDepth.takeIf { it > 0 }?.let {
+                add(SongProperty(R.string.lbl_bit_depth, SongProperty.Value.BitDepth(it)))
+            }
             song.replayGainAdjustment.track?.let {
                 add(SongProperty(R.string.lbl_replaygain_track, SongProperty.Value.Decibels(it)))
             }
