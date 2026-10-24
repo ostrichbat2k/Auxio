@@ -135,6 +135,7 @@ class AlbumMenuDialogFragment : MenuDialogFragment<Menu.ForAlbum>() {
             R.id.action_artist_details -> detailModel.showArtist(menu.album)
             R.id.action_playlist_add -> musicModel.addToPlaylist(menu.album)
             R.id.action_share -> requireContext().share(menu.album)
+            R.id.action_delete -> musicModel.deleteSongs(menu.album.songs.toList())
             else -> error("Unexpected menu item selected $item")
         }
     }
