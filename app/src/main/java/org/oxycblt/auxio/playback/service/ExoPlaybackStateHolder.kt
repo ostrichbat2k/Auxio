@@ -67,7 +67,7 @@ import org.oxycblt.auxio.playback.state.RawQueue
 import org.oxycblt.auxio.playback.state.RepeatMode
 import org.oxycblt.auxio.playback.state.ShuffleMode
 import org.oxycblt.auxio.playback.state.StateAck
-import org.ostrichbat2k.usbdac.RoutingAudioSink
+import org.ostrichbat2k.usbdac.streaming.RoutingAudioSink
 import org.ostrichbat2k.usbdac.UsbAudioManager
 import org.ostrichbat2k.usbdac.UsbDacPreferences
 import org.oxycblt.musikr.MusicParent

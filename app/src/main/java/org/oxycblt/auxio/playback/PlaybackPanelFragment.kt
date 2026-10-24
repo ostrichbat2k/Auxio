@@ -57,8 +57,8 @@ import org.oxycblt.auxio.playback.ui.swiper.CoverPagerAdapter
 import org.oxycblt.auxio.playback.ui.swiper.UserAwarePagerCallback
 import org.oxycblt.auxio.ui.ViewBindingFragment
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import org.ostrichbat2k.usbdac.control.UsbControlState
 import org.ostrichbat2k.usbdac.UsbAudioManager
-import org.ostrichbat2k.usbdac.UsbControlState
 import org.ostrichbat2k.usbdac.UsbDacPreferences
 import org.oxycblt.auxio.util.collectImmediately
 import org.oxycblt.auxio.util.dampen
