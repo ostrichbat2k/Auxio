@@ -594,6 +594,17 @@ class ExoPlaybackStateHolder(
             sendNewPlaybackEvent = true
         }
         if (rawQueue != resolveQueue()) {
+            // Preserve whatever playWhenReady already was rather than force-pausing -- this path
+            // also runs live, mid-playback, whenever the library changes under a still-ongoing
+            // session (see IndexingHolder.onMusicChanges' destructive applySavedState call,
+            // reached on every re-index, including the one a song deletion triggers). Confirmed,
+            // reproduced: deleting any song that was part of the current queue -- not necessarily
+            // the one actually playing -- rebuilt the player's media items here and then
+            // unconditionally paused, even though nothing about the song actually playing had
+            // changed. A real first-ever restore from disk (the only other caller, see
+            // DeferredPlayback.RestoreState) still ends up paused here regardless, since nothing
+            // has played yet at that point and playWhenReady is reliably false.
+            val wasPlaying = player.playWhenReady
             player.setMediaItems(rawQueue.heap.map { it.buildMediaItem() })
             if (rawQueue.isShuffled) {
                 player.shuffleModeEnabled = true
@@ -603,7 +614,7 @@ class ExoPlaybackStateHolder(
             }
             player.seekTo(rawQueue.heapIndex, C.TIME_UNSET)
             player.prepare()
-            player.pause()
+            player.playWhenReady = wasPlaying
             sendNewPlaybackEvent = true
             shouldSeek = true
         }
