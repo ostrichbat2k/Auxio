@@ -26,6 +26,7 @@ import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
+import org.ostrichbat2k.usbdac.UsbAudioManagerImpl
 import org.ostrichbat2k.usbdac.UsbAudioManager
 import org.ostrichbat2k.usbdac.UsbDacPreferences
 
@@ -42,6 +43,6 @@ interface UsbModule {
         fun provideUsbAudioManager(
             @ApplicationContext context: Context,
             settings: UsbDacPreferences,
-        ): UsbAudioManager = UsbAudioManager(context, settings)
+        ): UsbAudioManager = UsbAudioManagerImpl(context, settings)
     }
 }

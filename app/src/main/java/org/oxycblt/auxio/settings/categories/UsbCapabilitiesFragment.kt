@@ -31,13 +31,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.oxycblt.auxio.R
 import org.oxycblt.auxio.settings.BasePreferenceFragment
-import org.ostrichbat2k.usbdac.UacNonPcmFormat
-import org.ostrichbat2k.usbdac.UacStreamFormat
-import org.ostrichbat2k.usbdac.UsbAudioController
+import org.ostrichbat2k.usbdac.protocol.UacNonPcmFormat
+import org.ostrichbat2k.usbdac.protocol.UacStreamFormat
+import org.ostrichbat2k.usbdac.protocol.UsbAudioController
+import org.ostrichbat2k.usbdac.control.UsbControlState
+import org.ostrichbat2k.usbdac.protocol.UsbDeviceCapabilities
+import org.ostrichbat2k.usbdac.protocol.UsbInterfaceInfo
 import org.ostrichbat2k.usbdac.UsbAudioManager
-import org.ostrichbat2k.usbdac.UsbControlState
-import org.ostrichbat2k.usbdac.UsbDeviceCapabilities
-import org.ostrichbat2k.usbdac.UsbInterfaceInfo
 import org.oxycblt.auxio.util.collectImmediately
 
 /**

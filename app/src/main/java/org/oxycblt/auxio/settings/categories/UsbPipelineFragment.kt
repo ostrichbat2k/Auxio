@@ -24,9 +24,9 @@ import androidx.navigation.fragment.findNavController
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import org.oxycblt.auxio.databinding.FragmentUsbPipelineBinding
+import org.ostrichbat2k.usbdac.control.UsbControlState
+import org.ostrichbat2k.usbdac.streaming.UsbPipelineStats
 import org.ostrichbat2k.usbdac.UsbAudioManager
-import org.ostrichbat2k.usbdac.UsbControlState
-import org.ostrichbat2k.usbdac.UsbPipelineStats
 import org.oxycblt.auxio.ui.ViewBindingFragment
 import org.oxycblt.auxio.util.collectImmediately
 

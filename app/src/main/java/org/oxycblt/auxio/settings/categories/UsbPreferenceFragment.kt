@@ -30,10 +30,10 @@ import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import org.oxycblt.auxio.R
 import org.oxycblt.auxio.settings.BasePreferenceFragment
-import org.ostrichbat2k.usbdac.UsbAudioDevice
+import org.ostrichbat2k.usbdac.discovery.UsbAudioDevice
+import org.ostrichbat2k.usbdac.control.UsbControlState
+import org.ostrichbat2k.usbdac.protocol.UsbDeviceCapabilities
 import org.ostrichbat2k.usbdac.UsbAudioManager
-import org.ostrichbat2k.usbdac.UsbControlState
-import org.ostrichbat2k.usbdac.UsbDeviceCapabilities
 import org.ostrichbat2k.usbdac.UsbDacPreferences
 import org.oxycblt.auxio.util.collectImmediately
 import org.oxycblt.auxio.util.navigateSafe
