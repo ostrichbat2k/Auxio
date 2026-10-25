@@ -44,6 +44,12 @@ class UsbSettingsImpl @Inject constructor(@ApplicationContext context: Context) 
     override val abxTestMode: Boolean
         get() = sharedPreferences.getBoolean(getString(R.string.set_key_usb_abx_test), false)
 
+    override val volumeStepPercent: Int
+        get() =
+            sharedPreferences
+                .getInt(getString(R.string.set_key_usb_volume_step_percent), DEFAULT_VOLUME_STEP_PERCENT)
+                .coerceIn(1, UsbDacPreferences.MAX_VOLUME_STEP_PERCENT)
+
     override var volumeDb: Int?
         get() =
             getString(R.string.set_key_usb_volume).let { key ->
@@ -61,6 +67,12 @@ class UsbSettingsImpl @Inject constructor(@ApplicationContext context: Context) 
             getString(R.string.set_key_usb_enabled) -> listener.onUsbEnabledChanged()
             getString(R.string.set_key_usb_bit_perfect) -> listener.onBitPerfectModeChanged()
             getString(R.string.set_key_usb_abx_test) -> listener.onAbxTestModeChanged()
+            getString(R.string.set_key_usb_volume_step_percent) -> listener.onVolumeStepPercentChanged()
         }
+    }
+
+    private companion object {
+        /** Matches the system volume UI's old fixed 20-step granularity (1/20 = 5%). */
+        const val DEFAULT_VOLUME_STEP_PERCENT = 5
     }
 }
