@@ -33,6 +33,54 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@+id/playback_toolbar" />
 
+    <FrameLayout
+        android:id="@+id/lyrics_overlay"
+        style="@style/Widget.Auxio.Image.Full"
+        android:layout_marginVertical="@dimen/spacing_small"
+        android:layout_marginStart="@dimen/spacing_medium"
+        android:clickable="true"
+        android:focusable="true"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@+id/playback_toolbar"
+        tools:visibility="visible">
+
+        <org.oxycblt.auxio.image.CoverView
+            android:id="@+id/lyrics_overlay_backdrop"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            app:enablePlaybackIndicator="false"
+            app:enableSelectionBadge="false" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="#66000000" />
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/lyrics_overlay_recycler"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clipToPadding="false"
+            android:paddingHorizontal="@dimen/spacing_medium"
+            android:paddingVertical="@dimen/spacing_medium"
+            tools:listitem="@layout/item_lyrics_line" />
+
+        <TextView
+            android:id="@+id/lyrics_overlay_empty"
+            style="@style/Widget.Auxio.TextView.Secondary.Base"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_gravity="center"
+            android:gravity="center"
+            android:text="@string/err_no_lyrics"
+            android:textAlignment="center"
+            android:textColor="@android:color/white"
+            android:visibility="gone" />
+
+    </FrameLayout>
+
     <LinearLayout
         android:id="@+id/playback_info_container"
         android:layout_width="0dp"

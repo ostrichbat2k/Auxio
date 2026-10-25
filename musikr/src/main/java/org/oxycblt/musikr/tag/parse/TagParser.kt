@@ -54,6 +54,7 @@ private data object TagParserImpl : TagParser {
             track = metadata.track(),
             disc = metadata.disc(),
             subtitle = metadata.subtitle(),
+            lyrics = metadata.lyrics(),
             date = metadata.date(),
             albumMusicBrainzId = metadata.albumMusicBrainzId(),
             albumName = metadata.albumName(),

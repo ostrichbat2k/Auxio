@@ -30,6 +30,7 @@ data class ParsedTags(
     val track: Int? = null,
     val disc: Int? = null,
     val subtitle: String? = null,
+    val lyrics: String? = null,
     val date: Date? = null,
     val albumMusicBrainzId: String? = null,
     val albumName: String? = null,

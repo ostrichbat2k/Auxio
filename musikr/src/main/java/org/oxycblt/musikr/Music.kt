@@ -273,6 +273,13 @@ interface Song : Music {
     val track: Int?
     /** The [Disc] number. Will be null if no valid disc number was present in the metadata. */
     val disc: Disc?
+    /**
+     * The raw embedded lyrics text, or null if no lyrics were present in the metadata. May itself
+     * be LRC-formatted (`[mm:ss.xx]...` per line) when the source was a binary-synced ID3v2 SYLT
+     * frame or a tagger that writes LRC markup directly into USLT/Xiph lyrics fields -- parse with
+     * an LRC-aware parser before displaying rather than assuming plain text.
+     */
+    val lyrics: String?
     /** The release [Date]. Will be null if no valid date was present in the metadata. */
     val date: Date?
     /**

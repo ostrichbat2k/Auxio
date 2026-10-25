@@ -58,6 +58,48 @@ class TagFieldsTest {
     }
 
     @Test
+    fun metadata_lyrics_formats() {
+        // Test ID3v2 USLT (plain text, as forwarded by JMetadataBuilder under "USLT")
+        var metadata = createTestMetadata(id3v2Tags = mapOf("USLT" to listOf("Unsynced lyrics")))
+        assertEquals("Unsynced lyrics", metadata.lyrics())
+
+        // Test ID3v2 SYLT (JMetadataBuilder renders it as LRC text under "SYLT")
+        metadata =
+            createTestMetadata(id3v2Tags = mapOf("SYLT" to listOf("[00:01.00]Synced lyrics\n")))
+        assertEquals("[00:01.00]Synced lyrics\n", metadata.lyrics())
+
+        // Test Xiph LYRICS
+        metadata = createTestMetadata(xiphTags = mapOf("LYRICS" to listOf("Xiph lyrics")))
+        assertEquals("Xiph lyrics", metadata.lyrics())
+
+        // Test Xiph UNSYNCEDLYRICS
+        metadata =
+            createTestMetadata(xiphTags = mapOf("UNSYNCEDLYRICS" to listOf("Xiph unsynced")))
+        assertEquals("Xiph unsynced", metadata.lyrics())
+
+        // Test MP4 lyrics atom
+        metadata = createTestMetadata(mp4Tags = mapOf("©lyr" to listOf("MP4 lyrics")))
+        assertEquals("MP4 lyrics", metadata.lyrics())
+
+        // Test priority (SYLT > xiph > mp4 > USLT)
+        metadata =
+            createTestMetadata(
+                id3v2Tags =
+                    mapOf(
+                        "SYLT" to listOf("[00:01.00]Synced\n"),
+                        "USLT" to listOf("Unsynced"),
+                    ),
+                xiphTags = mapOf("LYRICS" to listOf("Xiph lyrics")),
+                mp4Tags = mapOf("©lyr" to listOf("MP4 lyrics")),
+            )
+        assertEquals("[00:01.00]Synced\n", metadata.lyrics())
+
+        // Test absence
+        metadata = createTestMetadata()
+        assertNull(metadata.lyrics())
+    }
+
+    @Test
     fun metadata_track_formats() {
         // Test ID3v2 format
         var metadata = createTestMetadata(id3v2Tags = mapOf("TRCK" to listOf("5/10")))
@@ -331,7 +373,7 @@ class TagFieldsTest {
         sampleRateHz: Int = 44100,
         mimeType: String = "audio/mpeg",
     ): Metadata {
-        val properties = Properties(mimeType, durationMs, bitrateKbps, sampleRateHz)
+        val properties = Properties(mimeType, durationMs, bitrateKbps, sampleRateHz, 0)
         return Metadata(id3v2Tags, xiphTags, mp4Tags, cover, properties)
     }
 }

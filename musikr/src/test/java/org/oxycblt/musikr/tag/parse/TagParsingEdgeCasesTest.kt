@@ -242,7 +242,7 @@ class TagParsingEdgeCasesTest {
         sampleRateHz: Int = 44100,
         mimeType: String = "audio/mpeg",
     ): Metadata {
-        val properties = Properties(mimeType, durationMs, bitrateKbps, sampleRateHz)
+        val properties = Properties(mimeType, durationMs, bitrateKbps, sampleRateHz, 0)
         return Metadata(id3v2Tags, xiphTags, mp4Tags, cover, properties)
     }
 }
