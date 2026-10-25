@@ -114,6 +114,7 @@ private constructor(
 
     private val volumeJob = Job()
     private val volumeScope = CoroutineScope(Dispatchers.Main + volumeJob)
+    private var usbVolumeProvider: UsbVolumeProvider? = null
 
     fun attach() {
         playbackManager.addListener(this)
@@ -192,17 +193,24 @@ private constructor(
         val range = usbAudioManager.controlState.value?.volumeRange
         val isDirect = usbAudioManager.playbackRoute.value is UsbAudioManager.PlaybackRoute.Direct
         if (usbSettings.bitPerfectMode && range != null && isDirect) {
-            // VolumeProviderCompat's maxVolume is fixed at construction -- a new instance is the
-            // only way to pick up a changed usbSettings.volumeStepPercent, so one is built fresh
-            // on every routing update rather than cached. Cheap: applyRange() already recomputes
-            // currentVolume from scratch every time anyway, so no state actually carries over
-            // between calls even with the old single-instance approach.
+            // VolumeProviderCompat's maxVolume is fixed at construction, so a changed
+            // usbSettings.volumeStepPercent does need a new instance -- but re-registering a
+            // *different* VolumeProviderCompat object via setPlaybackToRemote on every single
+            // routing update (this runs on every controlState emission, which includes a
+            // once-a-second refreshControlState() poll, not just real user action) was confirmed
+            // on real hardware to make the platform re-assert/resync volume against the fresh
+            // object, landing one step off via dbToStep/stepToDb rounding -- an oscillation with
+            // no corresponding key press. The existing instance is reused whenever the percent
+            // hasn't actually changed, matching what a single long-lived provider did before.
             val percent =
                 usbSettings.volumeStepPercent.coerceIn(1, UsbDacPreferences.MAX_VOLUME_STEP_PERCENT)
-            val provider = UsbVolumeProvider(percent)
+            val provider =
+                usbVolumeProvider?.takeIf { it.percentPerStep == percent }
+                    ?: UsbVolumeProvider(percent).also { usbVolumeProvider = it }
             provider.applyRange(range)
             mediaSession.setPlaybackToRemote(provider)
         } else {
+            usbVolumeProvider = null
             mediaSession.setPlaybackToLocal(AudioManager.STREAM_MUSIC)
         }
     }
@@ -219,9 +227,9 @@ private constructor(
      * slices [range] is cut into for [VolumeProviderCompat]'s own 0..maxVolume scale -- is
      * `100 / percentPerStep`, e.g. a 5% step means the range is cut into 20 slices.
      */
-    private inner class UsbVolumeProvider(percentPerStep: Int) :
-        VolumeProviderCompat(VOLUME_CONTROL_ABSOLUTE, 100 / percentPerStep, 0) {
-        private val divisions = 100 / percentPerStep
+    private inner class UsbVolumeProvider(val percentPerStep: Int) :
+        VolumeProviderCompat(VOLUME_CONTROL_ABSOLUTE, UsbVolumeSteps.divisions(percentPerStep), 0) {
+        private val divisions = UsbVolumeSteps.divisions(percentPerStep)
         private var range: Pair<Int, Int> = 0 to 0
 
         fun applyRange(newRange: Pair<Int, Int>) {
@@ -247,30 +255,19 @@ private constructor(
             // never has this race -- it's set directly, synchronously, by whichever code path
             // decided what the real target volume should be, not reconstructed from a readback.
             val db = usbSettings.volumeDb ?: usbAudioManager.controlState.value?.volume ?: newRange.second
-            currentVolume = dbToStep(db)
+            currentVolume = UsbVolumeSteps.dbToStep(db, range, divisions)
         }
 
         override fun onSetVolumeTo(volume: Int) {
             val step = volume.coerceIn(0, divisions)
-            usbAudioManager.setVolume(stepToDb(step))
+            usbAudioManager.setVolume(UsbVolumeSteps.stepToDb(step, range, divisions))
             currentVolume = step
         }
 
         override fun onAdjustVolume(direction: Int) {
             val step = (currentVolume + direction).coerceIn(0, divisions)
-            usbAudioManager.setVolume(stepToDb(step))
+            usbAudioManager.setVolume(UsbVolumeSteps.stepToDb(step, range, divisions))
             currentVolume = step
-        }
-
-        private fun stepToDb(step: Int): Int {
-            val (min, max) = range
-            return min + (max - min) * step / divisions
-        }
-
-        private fun dbToStep(db: Int): Int {
-            val (min, max) = range
-            if (max == min) return 0
-            return ((db - min) * divisions / (max - min)).coerceIn(0, divisions)
         }
     }
 
