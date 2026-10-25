@@ -114,7 +114,7 @@ private constructor(
 
     private val volumeJob = Job()
     private val volumeScope = CoroutineScope(Dispatchers.Main + volumeJob)
-    private val usbVolumeProvider = UsbVolumeProvider()
+    private var usbVolumeProvider: UsbVolumeProvider? = null
 
     fun attach() {
         playbackManager.addListener(this)
@@ -164,6 +164,10 @@ private constructor(
         updateVolumeRouting()
     }
 
+    override fun onVolumeStepPercentChanged() {
+        updateVolumeRouting()
+    }
+
     /**
      * Routes the device's physical volume keys to the DAC's own hardware volume (via
      * [usbAudioManager]) instead of Android's normal [AudioManager.STREAM_MUSIC] handling,
@@ -174,8 +178,8 @@ private constructor(
      * keys adjust by default -- has no connection whatsoever to what's actually reaching the
      * DAC: the keys would move a slider that does nothing audible. [MediaSessionCompat
      * .setPlaybackToRemote] is the standard mechanism for exactly this (the same one a
-     * Cast/Bluetooth-AVRCP-absolute-volume session uses) -- it hands volume key events to
-     * [usbVolumeProvider] instead, which forwards them to the Feature Unit via
+     * Cast/Bluetooth-AVRCP-absolute-volume session uses) -- it hands volume key events to a
+     * [UsbVolumeProvider] instead, which forwards them to the Feature Unit via
      * [usbAudioManager]. [usbAudioManager.resolveActiveSink] is null unless
      * [UsbDacPreferences.bitPerfectMode] is on *and* the device's volume range was actually read back
      * successfully ([UsbAudioManager.isBitPerfectCapable]) -- the same condition
@@ -189,21 +193,43 @@ private constructor(
         val range = usbAudioManager.controlState.value?.volumeRange
         val isDirect = usbAudioManager.playbackRoute.value is UsbAudioManager.PlaybackRoute.Direct
         if (usbSettings.bitPerfectMode && range != null && isDirect) {
-            usbVolumeProvider.applyRange(range)
-            mediaSession.setPlaybackToRemote(usbVolumeProvider)
+            // VolumeProviderCompat's maxVolume is fixed at construction, so a changed
+            // usbSettings.volumeStepPercent does need a new instance -- but re-registering a
+            // *different* VolumeProviderCompat object via setPlaybackToRemote on every single
+            // routing update (this runs on every controlState emission, which includes a
+            // once-a-second refreshControlState() poll, not just real user action) was confirmed
+            // on real hardware to make the platform re-assert/resync volume against the fresh
+            // object, landing one step off via dbToStep/stepToDb rounding -- an oscillation with
+            // no corresponding key press. The existing instance is reused whenever the percent
+            // hasn't actually changed, matching what a single long-lived provider did before.
+            val percent =
+                usbSettings.volumeStepPercent.coerceIn(1, UsbDacPreferences.MAX_VOLUME_STEP_PERCENT)
+            val provider =
+                usbVolumeProvider?.takeIf { it.percentPerStep == percent }
+                    ?: UsbVolumeProvider(percent).also { usbVolumeProvider = it }
+            provider.applyRange(range)
+            mediaSession.setPlaybackToRemote(provider)
         } else {
+            usbVolumeProvider = null
             mediaSession.setPlaybackToLocal(AudioManager.STREAM_MUSIC)
         }
     }
 
     /**
-     * Translates the system volume UI's abstract 0..[VOLUME_STEPS] scale to/from the DAC's own
-     * raw dB*256 Feature Unit range, since [VolumeProviderCompat] needs a small fixed step count
-     * (matching what a physical volume key press should move by) rather than the device's often
-     * much finer native resolution.
+     * Translates the system volume UI's abstract 0..[divisions] scale to/from the DAC's own raw
+     * dB*256 Feature Unit range, since [VolumeProviderCompat] needs a small fixed step count
+     * rather than the device's often much finer native resolution -- and that native range's
+     * actual min/max varies per device (see the Capabilities screen), so a fixed dB delta per
+     * step would feel wildly different from one DAC to the next.
+     *
+     * [percentPerStep] is the user-facing control ([UsbDacPreferences.volumeStepPercent]: what
+     * percentage of [range] one press should move). [divisions] -- the actual number of equal
+     * slices [range] is cut into for [VolumeProviderCompat]'s own 0..maxVolume scale -- is
+     * `100 / percentPerStep`, e.g. a 5% step means the range is cut into 20 slices.
      */
-    private inner class UsbVolumeProvider :
-        VolumeProviderCompat(VOLUME_CONTROL_ABSOLUTE, VOLUME_STEPS, 0) {
+    private inner class UsbVolumeProvider(val percentPerStep: Int) :
+        VolumeProviderCompat(VOLUME_CONTROL_ABSOLUTE, UsbVolumeSteps.divisions(percentPerStep), 0) {
+        private val divisions = UsbVolumeSteps.divisions(percentPerStep)
         private var range: Pair<Int, Int> = 0 to 0
 
         fun applyRange(newRange: Pair<Int, Int>) {
@@ -229,30 +255,19 @@ private constructor(
             // never has this race -- it's set directly, synchronously, by whichever code path
             // decided what the real target volume should be, not reconstructed from a readback.
             val db = usbSettings.volumeDb ?: usbAudioManager.controlState.value?.volume ?: newRange.second
-            currentVolume = dbToStep(db)
+            currentVolume = UsbVolumeSteps.dbToStep(db, range, divisions)
         }
 
         override fun onSetVolumeTo(volume: Int) {
-            val step = volume.coerceIn(0, VOLUME_STEPS)
-            usbAudioManager.setVolume(stepToDb(step))
+            val step = volume.coerceIn(0, divisions)
+            usbAudioManager.setVolume(UsbVolumeSteps.stepToDb(step, range, divisions))
             currentVolume = step
         }
 
         override fun onAdjustVolume(direction: Int) {
-            val step = (currentVolume + direction).coerceIn(0, VOLUME_STEPS)
-            usbAudioManager.setVolume(stepToDb(step))
+            val step = (currentVolume + direction).coerceIn(0, divisions)
+            usbAudioManager.setVolume(UsbVolumeSteps.stepToDb(step, range, divisions))
             currentVolume = step
-        }
-
-        private fun stepToDb(step: Int): Int {
-            val (min, max) = range
-            return min + (max - min) * step / VOLUME_STEPS
-        }
-
-        private fun dbToStep(db: Int): Int {
-            val (min, max) = range
-            if (max == min) return 0
-            return ((db - min) * VOLUME_STEPS / (max - min)).coerceIn(0, VOLUME_STEPS)
         }
     }
 
@@ -511,13 +526,6 @@ private constructor(
 
     companion object {
         private val emptyMetadata = MediaMetadataCompat.Builder().build()
-
-        /**
-         * How many discrete clicks the system volume UI shows for the DAC's remote volume, and
-         * how much one physical volume key press moves it by. Independent of the device's actual
-         * native dB resolution -- see [UsbVolumeProvider].
-         */
-        private const val VOLUME_STEPS = 20
     }
 }
 

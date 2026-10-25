@@ -9,6 +9,7 @@
     <string name="set_key_usb_enabled" translatable="false">auxio_usb_enabled</string>
     <string name="set_key_usb_bit_perfect" translatable="false">auxio_usb_bit_perfect</string>
     <string name="set_key_usb_abx_test" translatable="false">auxio_usb_abx_test</string>
+    <string name="set_key_usb_volume_step_percent" translatable="false">auxio_usb_volume_step_percent</string>
     <string name="set_key_usb_device" translatable="false">auxio_usb_device</string>
     <string name="set_key_usb_retry" translatable="false">auxio_usb_retry</string>
     <string name="set_key_usb_capabilities" translatable="false">auxio_usb_capabilities</string>
