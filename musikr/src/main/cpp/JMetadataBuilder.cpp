@@ -38,7 +38,7 @@ JMetadataBuilder::JMetadataBuilder(JNIEnv *env) : env(env), id3v2(env), xiph(
         env), mp4(env), cover(), properties(nullptr) {
 }
 
-void JMetadataBuilder::setMimeType(TagLib::String type) {
+void JMetadataBuilder::setMimeType(const TagLib::String &type) {
     mimeType = type;
 }
 
@@ -48,7 +48,7 @@ void JMetadataBuilder::setId3v1(TagLib::ID3v1::Tag &tag) {
     id3v2.add_id("TALB", tag.album());
     id3v2.add_id("TRCK", std::to_string(tag.track()));
     id3v2.add_id("TYER", std::to_string(tag.year()));
-    const int genreNumber = tag.genreNumber();
+    const int genreNumber = static_cast<int>(tag.genreNumber());
     if (genreNumber != 255) {
         id3v2.add_id("TCON", std::to_string(genreNumber));
     }
@@ -98,7 +98,7 @@ void JMetadataBuilder::setId3v2(TagLib::ID3v2::Tag &tag) {
 }
 
 void JMetadataBuilder::setXiph(TagLib::Ogg::XiphComment &tag) {
-    for (auto field : tag.fieldListMap()) {
+    for (const auto &field : tag.fieldListMap()) {
         auto key = field.first.upper();
         auto values = field.second;
         xiph.add_custom(key, values);
@@ -123,7 +123,7 @@ void mp4AddImpl(JTagMap &map, TagLib::String &itemName, T itemValue) {
 void JMetadataBuilder::setMp4(TagLib::MP4::Tag &tag) {
     auto map = tag.itemMap();
     std::optional < TagLib::MP4::CoverArt > firstCover;
-    for (auto item : map) {
+    for (const auto &item : map) {
         auto itemName = item.first;
         auto itemValue = item.second;
         if (itemName == "covr") {
