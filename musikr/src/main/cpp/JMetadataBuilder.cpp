@@ -26,6 +26,8 @@
 #include <taglib/wavproperties.h>
 #include <taglib/textidentificationframe.h>
 #include <taglib/attachedpictureframe.h>
+#include <taglib/unsynchronizedlyricsframe.h>
+#include <taglib/synchronizedlyricsframe.h>
 
 #include <taglib/tpropertymap.h>
 
@@ -54,10 +56,30 @@ void JMetadataBuilder::setId3v1(TagLib::ID3v1::Tag &tag) {
     }
 }
 
+// Renders a parsed SYLT frame as LRC-formatted text (`[mm:ss.xx]line`, one per entry, in
+// whatever order TagLib returned them), so the Kotlin side can treat it exactly like any other
+// LRC-bearing lyrics source (sidecar .lrc files, or LRC markup taggers embed directly in USLT).
+static TagLib::String formatSyltAsLrc(
+        const TagLib::ID3v2::SynchronizedLyricsFrame::SynchedTextList &synchedText) {
+    TagLib::String out;
+    for (const auto &entry : synchedText) {
+        unsigned int totalMs = entry.time;
+        unsigned int minutes = totalMs / 60000;
+        unsigned int seconds = (totalMs / 1000) % 60;
+        unsigned int centis = (totalMs % 1000) / 10;
+        char stamp[16];
+        snprintf(stamp, sizeof(stamp), "[%02u:%02u.%02u]", minutes, seconds, centis);
+        out += TagLib::String(stamp) + entry.text + "\n";
+    }
+    return out;
+}
+
 void JMetadataBuilder::setId3v2(TagLib::ID3v2::Tag &tag) {
     // We want to ideally find the front cover, fall back to the first picture otherwise.
     std::optional<TagLib::ID3v2::AttachedPictureFrame*> firstPic;
     std::optional<TagLib::ID3v2::AttachedPictureFrame*> frontCoverPic;
+    std::optional<TagLib::String> id3v2UnsyncedLyrics;
+    std::optional<TagLib::String> id3v2SyncedLyrics;
     for (auto frame : tag.frameList()) {
         if (auto txxxFrame =
                 dynamic_cast<TagLib::ID3v2::UserTextIdentificationFrame*>(frame)) {
@@ -84,6 +106,26 @@ void JMetadataBuilder::setId3v2(TagLib::ID3v2::Tag &tag) {
                             == TagLib::ID3v2::AttachedPictureFrame::FrontCover) {
                 frontCoverPic = pictureFrame;
             }
+        } else if (auto lyricsFrame =
+                dynamic_cast<TagLib::ID3v2::UnsynchronizedLyricsFrame*>(frame)) {
+            // There can be multiple USLT frames (one per language/description); just take the
+            // first non-empty one.
+            if (!id3v2UnsyncedLyrics && !lyricsFrame->text().isEmpty()) {
+                id3v2UnsyncedLyrics = lyricsFrame->text();
+            }
+        } else if (auto syltFrame =
+                dynamic_cast<TagLib::ID3v2::SynchronizedLyricsFrame*>(frame)) {
+            // Taggers that write SYLT at all essentially always use millisecond timestamps;
+            // MPEG-frame-based timestamps would require decoder-specific frame-rate info we
+            // don't have here, so those are left for the USLT/Xiph/MP4 fallback instead.
+            if (!id3v2SyncedLyrics
+                    && syltFrame->timestampFormat()
+                            == TagLib::ID3v2::SynchronizedLyricsFrame::AbsoluteMilliseconds) {
+                auto lrc = formatSyltAsLrc(syltFrame->synchedText());
+                if (!lrc.isEmpty()) {
+                    id3v2SyncedLyrics = lrc;
+                }
+            }
         } else {
             continue;
         }
@@ -94,6 +136,12 @@ void JMetadataBuilder::setId3v2(TagLib::ID3v2::Tag &tag) {
     } else if (firstPic) {
         auto pic = *firstPic;
         cover = pic->picture();
+    }
+    // Prefer the binary-synced SYLT frame over plain USLT text when both are present.
+    if (id3v2SyncedLyrics) {
+        id3v2.add_id("SYLT", *id3v2SyncedLyrics);
+    } else if (id3v2UnsyncedLyrics) {
+        id3v2.add_id("USLT", *id3v2UnsyncedLyrics);
     }
 }
 

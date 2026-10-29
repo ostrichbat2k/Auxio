@@ -128,6 +128,7 @@
 
     <string name="lbl_playback">Now playing</string>
     <string name="lbl_equalizer">Equalizer</string>
+    <string name="lbl_lyrics">Lyrics</string>
     <string name="lbl_play">Play</string>
     <string name="lbl_shuffle">Shuffle</string>
 
@@ -401,6 +402,7 @@
     <string name="err_share_too_large">This is too large to share</string>
     <string name="err_share_failed">Unable to share this</string>
     <string name="err_no_app">No app found that can handle this task</string>
+    <string name="err_no_lyrics">No lyrics found for this song</string>
     <string name="err_delete_failed">Unable to delete this from the device</string>
     <!-- No folders in the "Music Folders" setting -->
     <string name="err_bad_location">This folder is not supported</string>

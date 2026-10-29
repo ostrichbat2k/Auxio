@@ -21,22 +21,34 @@ package org.oxycblt.auxio.playback
 import android.animation.ObjectAnimator
 import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
+import android.content.Context
 import android.content.Intent
+import android.content.res.ColorStateList
+import android.graphics.Color
+import android.graphics.RenderEffect
+import android.graphics.Shader
 import android.media.audiofx.AudioEffect
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
+import android.view.GestureDetector
 import android.view.LayoutInflater
 import android.view.MenuItem
+import android.view.MotionEvent
 import android.view.View
 import android.view.animation.LinearInterpolator
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.widget.Toolbar
+import androidx.core.view.isVisible
 import androidx.core.view.updatePadding
 import androidx.dynamicanimation.animation.SpringForce
 import androidx.fragment.app.activityViewModels
 import androidx.fragment.app.viewModels
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.shape.MaterialShapeDrawable
+import com.google.android.material.shape.ShapeAppearanceModel
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlin.math.abs
@@ -47,6 +59,10 @@ import org.oxycblt.auxio.list.ListViewModel
 import org.oxycblt.auxio.music.resolve
 import org.oxycblt.auxio.music.resolveNames
 import org.oxycblt.auxio.music.resolveShort
+import org.oxycblt.auxio.playback.lyrics.LrcParser
+import org.oxycblt.auxio.playback.lyrics.Lyrics
+import org.oxycblt.auxio.playback.lyrics.LyricsAdapter
+import org.oxycblt.auxio.playback.lyrics.currentLyricsLineIndex
 import org.oxycblt.auxio.playback.queue.QueueViewModel
 import org.oxycblt.auxio.playback.state.RepeatMode
 import org.oxycblt.auxio.playback.ui.StyledSeekBar
@@ -87,6 +103,10 @@ class PlaybackPanelFragment :
     @Inject lateinit var usbAudioManager: UsbAudioManager
     @Inject lateinit var usbSettings: UsbDacPreferences
     private val coverPagerAdapter = CoverPagerAdapter(this)
+    private val lyricsOverlayAdapter = LyricsAdapter()
+    private var lyricsOverlayLayoutManager: LyricsScrollLayoutManager? = null
+    private var lyricsOverlayTapListener: RecyclerView.SimpleOnItemTouchListener? = null
+    private var lyrics: Lyrics? = null
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val detailModel: DetailViewModel by activityViewModels()
     private val listModel: ListViewModel by activityViewModels()
@@ -144,6 +164,61 @@ class PlaybackPanelFragment :
             // Make it easier to collapse the bottom sheet
             dampen()
             offscreenPageLimit = 1
+        }
+
+        // Set up the lyrics-over-blurred-art overlay, toggled by tapping the cover (see
+        // onSingleTap). It's a sibling clipped to the same rounded shape the cover pages
+        // themselves use, built the same way StepperOverlay clips its own shape.
+        binding.lyricsOverlay.apply {
+            clipToOutline = true
+            background =
+                MaterialShapeDrawable().apply {
+                    shapeAppearanceModel =
+                        ShapeAppearanceModel.builder(
+                                context,
+                                com.google.android.material.R.style
+                                    .ShapeAppearance_Material3_Corner_ExtraLarge,
+                                -1)
+                            .build()
+                    fillColor = ColorStateList.valueOf(Color.TRANSPARENT)
+                }
+            setOnClickListener { toggleLyricsOverlay() }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                binding.lyricsOverlayBackdrop.setRenderEffect(
+                    RenderEffect.createBlurEffect(60f, 60f, Shader.TileMode.CLAMP))
+            }
+        }
+        binding.lyricsOverlayRecycler.apply {
+            adapter = lyricsOverlayAdapter
+            // For synced lyrics, scrolling here is purely programmatic (auto-advance to the
+            // current line) -- user-driven vertical scroll is disabled so a single tap is the
+            // only gesture, without affecting scrollToPositionWithOffset calls. Unsynced lyrics
+            // have no auto-scroll to rely on, so scrolling stays enabled there (toggled in
+            // updateLyricsOverlayContent) or the tail of a long lyric would be unreachable.
+            layoutManager = LyricsScrollLayoutManager(context).also { lyricsOverlayLayoutManager = it }
+            // A plain OnClickListener on a RecyclerView doesn't reliably fire for taps landing
+            // within its scrollable content -- its own touch handling can swallow the gesture
+            // before performClick() would trigger. A GestureDetector-based OnItemTouchListener
+            // that doesn't intercept is the reliable way to catch a plain tap anywhere in it.
+            val tapListener =
+                object : RecyclerView.SimpleOnItemTouchListener() {
+                    private val detector =
+                        GestureDetector(
+                            context,
+                            object : GestureDetector.SimpleOnGestureListener() {
+                                override fun onSingleTapUp(e: MotionEvent): Boolean {
+                                    toggleLyricsOverlay()
+                                    return true
+                                }
+                            })
+
+                    override fun onInterceptTouchEvent(rv: RecyclerView, e: MotionEvent): Boolean {
+                        detector.onTouchEvent(e)
+                        return false
+                    }
+                }
+            lyricsOverlayTapListener = tapListener
+            addOnItemTouchListener(tapListener)
         }
 
         // Set up fast seek overlay
@@ -244,6 +319,11 @@ class PlaybackPanelFragment :
         binding.playbackToolbar.setOnMenuItemClickListener(null)
         userAwarePagerCallback?.release()
         binding.playbackPager?.adapter = null
+        binding.lyricsOverlay.setOnClickListener(null)
+        lyricsOverlayTapListener?.let { binding.lyricsOverlayRecycler.removeOnItemTouchListener(it) }
+        lyricsOverlayTapListener = null
+        binding.lyricsOverlayRecycler.adapter = null
+        lyricsOverlayLayoutManager = null
     }
 
     override fun onMenuItemClick(item: MenuItem): Boolean {
@@ -287,6 +367,9 @@ class PlaybackPanelFragment :
         binding.playbackArtist.text = song.artists.resolveNames(context)
         binding.playbackAlbum?.text = song.album.name.resolve(context)
         binding.playbackSeekBar?.durationDs = song.durationMs.msToDs()
+        if (binding.lyricsOverlay.isVisible) {
+            updateLyricsOverlayContent(song)
+        }
         // playbackRoute/controlState (updateUsbStatus's own triggers) don't necessarily re-emit
         // on every track change -- two consecutive HAL-fallback tracks report the exact same
         // PlaybackRoute.Fallback value (always the fixed HAL output format, never the file's own),
@@ -404,6 +487,53 @@ class PlaybackPanelFragment :
 
     private fun updatePosition(positionDs: Long) {
         requireBinding().playbackSeekBar?.positionDs = positionDs
+        updateLyricsOverlayPosition(positionDs)
+    }
+
+    /** Toggles the lyrics-over-blurred-art overlay, refreshing its content when opening. */
+    private fun toggleLyricsOverlay() {
+        val binding = requireBinding()
+        val opening = !binding.lyricsOverlay.isVisible
+        binding.lyricsOverlay.isVisible = opening
+        if (opening) {
+            playbackModel.song.value?.let { updateLyricsOverlayContent(it) }
+        }
+    }
+
+    private fun updateLyricsOverlayContent(song: Song) {
+        val binding = requireBinding()
+        binding.lyricsOverlayBackdrop.bind(song)
+        val parsed = LrcParser.parse(song.lyrics)
+        lyrics = parsed
+        binding.lyricsOverlayRecycler.isVisible = parsed != null
+        binding.lyricsOverlayEmpty.isVisible = parsed == null
+        // Unsynced lyrics have no auto-scroll to reach lines past the visible area, so they stay
+        // user-scrollable; synced lyrics are driven entirely by updateLyricsOverlayPosition.
+        lyricsOverlayLayoutManager?.scrollEnabled = parsed?.synced != true
+        lyricsOverlayAdapter.submitLines(parsed?.lines.orEmpty(), parsed?.synced == true) {
+            updateLyricsOverlayPosition(playbackModel.positionDs.value)
+        }
+    }
+
+    private fun updateLyricsOverlayPosition(positionDs: Long) {
+        val binding = requireBinding()
+        if (!binding.lyricsOverlay.isVisible) return
+        val lyrics = lyrics ?: return
+        if (!lyrics.synced) return
+        val index = currentLyricsLineIndex(lyrics.lines, positionDs.dsToMs())
+        // Only the adapter's own equality check (line == currentLine) guards setCurrentLine
+        // itself -- without also checking it here, every ~100ms position tick re-triggered a
+        // full scrollToPositionWithOffset layout pass even when the current line hadn't actually
+        // changed since the last tick.
+        val changed = index != lyricsOverlayAdapter.currentLine
+        lyricsOverlayAdapter.setCurrentLine(index)
+        if (changed && index >= 0) {
+            // Keep the current line pinned near the top rather than centered, so more of the
+            // upcoming lines are visible below it.
+            val recycler = binding.lyricsOverlayRecycler
+            val layoutManager = recycler.layoutManager as LinearLayoutManager
+            layoutManager.scrollToPositionWithOffset(index, recycler.height / 6)
+        }
     }
 
     private fun updateRepeat(repeatMode: RepeatMode) {
@@ -557,4 +687,20 @@ class PlaybackPanelFragment :
             Direction.BACKWARDS -> playbackModel.stepBackwards()
         }
     }
+
+    override fun onSingleTap() {
+        toggleLyricsOverlay()
+    }
+}
+
+/**
+ * A [LinearLayoutManager] whose user-driven scroll (drag/fling) can be toggled off while still
+ * allowing programmatic calls like [LinearLayoutManager.scrollToPositionWithOffset].
+ *
+ * @author Alexander Capehart (OxygenCobalt)
+ */
+private class LyricsScrollLayoutManager(context: Context) : LinearLayoutManager(context) {
+    var scrollEnabled = false
+
+    override fun canScrollVertically() = scrollEnabled
 }

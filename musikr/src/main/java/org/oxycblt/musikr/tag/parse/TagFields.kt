@@ -44,6 +44,14 @@ internal fun Metadata.name() =
 
 internal fun Metadata.sortName() = (xiph["TITLESORT"] ?: mp4["sonm"] ?: id3v2["TSOT"])?.first()
 
+// Lyrics. id3v2["SYLT"]/id3v2["USLT"] are populated by JMetadataBuilder from the ID3v2
+// SYLT/USLT frames (JMetadataBuilder renders SYLT as LRC-formatted text, so downstream parsing
+// is the same regardless of source). xiph LYRICS/UNSYNCEDLYRICS and the MP4 lyrics atom flow
+// through generically already, since setXiph/setMp4 forward all fields/items verbatim.
+internal fun Metadata.lyrics() =
+    (id3v2["SYLT"] ?: xiph["LYRICS"] ?: xiph["UNSYNCEDLYRICS"] ?: mp4["©lyr"] ?: id3v2["USLT"])
+        ?.first()
+
 // Track.
 internal fun Metadata.track() =
     (parseXiphPositionField(
