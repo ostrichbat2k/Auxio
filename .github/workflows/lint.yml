@@ -27,5 +27,7 @@ jobs:
       run: chmod +x gradlew
     - name: Check formatting with spotless
       run: ./gradlew spotlessCheck
+    - name: Static analysis with detekt
+      run: ./gradlew :app:detekt :musikr:detekt :libusbdac:detekt
     - name: Test musikr with Gradle
       run: ./gradlew musikr:testDebug
