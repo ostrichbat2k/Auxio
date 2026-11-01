@@ -147,7 +147,9 @@ dependencies {
 
     // Musikr
     implementation project(":musikr")
-    implementation project(":libusbdac")
+
+    // libusbdac -- published via JitPack from github.com/ostrichbat2k/libusbdac release tags.
+    implementation "com.github.ostrichbat2k:libusbdac:v0.1.0"
 
     // --- THIRD PARTY ---
 
