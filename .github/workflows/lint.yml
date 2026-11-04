@@ -28,6 +28,6 @@ jobs:
     - name: Check formatting with spotless
       run: ./gradlew spotlessCheck
     - name: Static analysis with detekt
-      run: ./gradlew :app:detekt :musikr:detekt :libusbdac:detekt
+      run: ./gradlew :app:detekt :musikr:detekt
     - name: Test musikr with Gradle
       run: ./gradlew musikr:testDebug

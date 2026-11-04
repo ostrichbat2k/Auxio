@@ -39,16 +39,11 @@ plugins {
     id "org.sonarqube" version "7.5.0.8588" apply true
 }
 
-// detekt is applied per-module below rather than via `apply true` here because :libusbdac
-// is also a standalone repo that applies and configures its own detekt in its own
-// build.gradle -- applying it again from this subprojects block would double-apply it.
 subprojects { subproject ->
-    if (subproject.name != 'libusbdac') {
-        subproject.apply plugin: 'io.gitlab.arturbosch.detekt'
-        subproject.detekt {
-            buildUponDefaultConfig = true
-            baseline = subproject.file("$rootDir/config/detekt/baseline-${subproject.name}.xml")
-        }
+    subproject.apply plugin: 'io.gitlab.arturbosch.detekt'
+    subproject.detekt {
+        buildUponDefaultConfig = true
+        baseline = subproject.file("$rootDir/config/detekt/baseline-${subproject.name}.xml")
     }
 }
 
