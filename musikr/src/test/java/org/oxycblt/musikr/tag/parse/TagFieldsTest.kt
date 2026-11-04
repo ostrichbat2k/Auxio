@@ -321,6 +321,7 @@ class TagFieldsTest {
         assertEquals(listOf("Classical", "Ambient"), metadata.genreNames())
     }
 
+    @Suppress("LongParameterList")
     private fun createTestMetadata(
         id3v2Tags: Map<String, List<String>> = emptyMap(),
         xiphTags: Map<String, List<String>> = emptyMap(),

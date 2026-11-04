@@ -171,6 +171,7 @@ class TagParserTest {
         assertEquals(listOf("composer-artist-mbid"), tags.artistMusicBrainzIds)
     }
 
+    @Suppress("LongParameterList")
     private fun createTestMetadata(
         id3v2Tags: Map<String, List<String>> = emptyMap(),
         xiphTags: Map<String, List<String>> = emptyMap(),

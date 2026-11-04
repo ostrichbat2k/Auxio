@@ -232,6 +232,7 @@ class TagParsingEdgeCasesTest {
         assertNull(metadata.date())
     }
 
+    @Suppress("LongParameterList")
     private fun createTestMetadata(
         id3v2Tags: Map<String, List<String>> = emptyMap(),
         xiphTags: Map<String, List<String>> = emptyMap(),
