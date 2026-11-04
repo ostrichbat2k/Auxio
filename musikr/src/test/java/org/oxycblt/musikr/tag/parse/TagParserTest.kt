@@ -180,8 +180,9 @@ class TagParserTest {
         bitrateKbps: Int = 320,
         sampleRateHz: Int = 44100,
         mimeType: String = "audio/mpeg",
+        bitDepth: Int = 16,
     ): Metadata {
-        val properties = Properties(mimeType, durationMs, bitrateKbps, sampleRateHz)
+        val properties = Properties(mimeType, durationMs, bitrateKbps, sampleRateHz, bitDepth)
         return Metadata(id3v2Tags, xiphTags, mp4Tags, cover, properties)
     }
 }
