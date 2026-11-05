@@ -19,6 +19,7 @@
 package org.oxycblt.auxio.usb
 
 import android.content.Context
+import androidx.media3.decoder.ffmpeg.RawSampleBitsData
 import dagger.Binds
 import dagger.Module
 import dagger.Provides
@@ -43,6 +44,16 @@ interface UsbModule {
         fun provideUsbAudioManager(
             @ApplicationContext context: Context,
             settings: UsbDacPreferences,
-        ): UsbAudioManager = UsbAudioManagerImpl(context, settings)
+        ): UsbAudioManager =
+            UsbAudioManagerImpl(context, settings) { format ->
+                // libusbdac has no dependency on decoder_ffmpeg (or any specific decoder) and
+                // never will -- it can't read this off the Format itself, so it asks the host
+                // app via this callback instead (see UsbAudioOutputProvider's own doc comment,
+                // libusbdac#67). Auxio's FfmpegAudioDecoder-based pipeline is the one thing that
+                // actually knows a track's real raw bit depth might be narrower than its
+                // pcmEncoding container (see RawSampleBitsData's own doc comment) -- hand back
+                // just the plain Int, nothing decoder-specific.
+                format.metadata?.getFirstEntryOfType(RawSampleBitsData::class.java)?.bitsPerRawSample
+            }
     }
 }

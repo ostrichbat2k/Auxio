@@ -33,7 +33,6 @@ import org.ostrichbat2k.usbdac.UsbAudioManager
 import org.ostrichbat2k.usbdac.control.UsbControlState
 import org.ostrichbat2k.usbdac.protocol.UacNonPcmFormat
 import org.ostrichbat2k.usbdac.protocol.UacStreamFormat
-import org.ostrichbat2k.usbdac.protocol.UsbAudioController
 import org.ostrichbat2k.usbdac.protocol.UsbDeviceCapabilities
 import org.ostrichbat2k.usbdac.protocol.UsbInterfaceInfo
 import org.oxycblt.auxio.R
@@ -394,12 +393,12 @@ class UsbCapabilitiesFragment : BasePreferenceFragment(R.xml.preferences_usb_cap
         }
     }
 
-    /** A short label for one of [UsbAudioController]'s PD_STATE_* constants, or "unknown". */
+    /** A short label for one of [UsbAudioManager]'s PD_STATE_* constants, or "unknown". */
     private fun powerStateLabel(state: Int?) =
         when (state) {
-            UsbAudioController.PD_STATE_D0 -> "currently D0, full power"
-            UsbAudioController.PD_STATE_D1 -> "currently D1, light sleep"
-            UsbAudioController.PD_STATE_D2 -> "currently D2, deep sleep"
+            UsbAudioManager.PD_STATE_D0 -> "currently D0, full power"
+            UsbAudioManager.PD_STATE_D1 -> "currently D1, light sleep"
+            UsbAudioManager.PD_STATE_D2 -> "currently D2, deep sleep"
             else -> "current state unknown"
         }
 
