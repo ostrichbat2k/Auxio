@@ -44,6 +44,9 @@ class UsbSettingsImpl @Inject constructor(@ApplicationContext context: Context) 
     override val abxTestMode: Boolean
         get() = sharedPreferences.getBoolean(getString(R.string.set_key_usb_abx_test), false)
 
+    override val manualReleaseControl: Boolean
+        get() = sharedPreferences.getBoolean(getString(R.string.set_key_usb_manual_release_control), false)
+
     override val volumeStepPercent: Int
         get() =
             sharedPreferences
@@ -52,6 +55,15 @@ class UsbSettingsImpl @Inject constructor(@ApplicationContext context: Context) 
                     DEFAULT_VOLUME_STEP_PERCENT,
                 )
                 .coerceIn(1, UsbDacPreferences.MAX_VOLUME_STEP_PERCENT)
+
+    override val maxVolumePercent: Int
+        get() =
+            sharedPreferences
+                .getInt(
+                    getString(R.string.set_key_usb_max_volume_percent),
+                    UsbDacPreferences.DEFAULT_MAX_VOLUME_PERCENT,
+                )
+                .coerceIn(1, 100)
 
     override var volumeDb: Int?
         get() =
@@ -72,6 +84,9 @@ class UsbSettingsImpl @Inject constructor(@ApplicationContext context: Context) 
             getString(R.string.set_key_usb_abx_test) -> listener.onAbxTestModeChanged()
             getString(R.string.set_key_usb_volume_step_percent) ->
                 listener.onVolumeStepPercentChanged()
+            getString(R.string.set_key_usb_max_volume_percent) ->
+                listener.onMaxVolumePercentChanged()
+            getString(R.string.set_key_usb_manual_release_control) -> listener.onManualReleaseControlChanged()
         }
     }
 

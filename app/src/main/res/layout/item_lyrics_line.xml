@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/lyrics_line"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginHorizontal="@dimen/spacing_medium"
+    android:layout_marginVertical="-4dp"
+    android:gravity="center"
+    android:textAlignment="center"
+    android:textAppearance="?attr/textAppearanceHeadlineLarge"
+    android:textColor="@android:color/white"
+    tools:text="Sample lyrics line" />

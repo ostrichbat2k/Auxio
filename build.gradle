@@ -56,9 +56,6 @@ sonar {
     }
 }
 
-// :libusbdac is excluded from both targets below, same as the detekt exclusion above --
-// it's a standalone repo with its own license and its own formatting setup, so applying
-// Auxio's NOTICE license header to its sources would be wrong.
 spotless {
     kotlin {
         target "{app,musikr}/src/**/*.kt"

@@ -18,8 +18,11 @@
  
 package org.oxycblt.auxio
 
+import android.content.ComponentName
 import android.content.Intent
 import android.os.Bundle
+import android.support.v4.media.MediaBrowserCompat
+import android.support.v4.media.session.MediaControllerCompat
 import android.view.View
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -38,6 +41,7 @@ import kotlinx.coroutines.launch
 import org.ostrichbat2k.usbdac.UsbAudioManager
 import org.ostrichbat2k.usbdac.UsbDacPreferences
 import org.oxycblt.auxio.databinding.ActivityMainBinding
+import org.oxycblt.auxio.music.LibraryOrganizer
 import org.oxycblt.auxio.music.MusicViewModel
 import org.oxycblt.auxio.playback.PlaybackViewModel
 import org.oxycblt.auxio.playback.state.DeferredPlayback
@@ -71,6 +75,26 @@ class MainActivity : AppCompatActivity() {
     @Inject lateinit var usbAudioManager: UsbAudioManager
     @Inject lateinit var usbSettings: UsbDacPreferences
 
+    // Claims hardware/Bluetooth media-key routing for as long as this Activity is the foreground
+    // window -- Activity.setMediaController's own doc comment says exactly this ("Media key ...
+    // events which are received while the Activity is in the foreground will be forwarded to the
+    // controller"), and PhoneWindow's key dispatch (frameworks/base) special-cases this ahead of
+    // MediaSessionService's normal session-priority routing entirely, which otherwise only
+    // reconsiders which app it targets when a *new* local audio player becomes active -- not
+    // just because this app came to the foreground. Confirmed on real hardware: without this,
+    // bringing Auxio to the foreground while paused (or while another app still holds that
+    // routing) left physical media keys going to that other app. AuxioService is a
+    // MediaBrowserServiceCompat, so a MediaBrowserCompat connection is the only way to reach its
+    // live MediaSessionCompat.Token from here.
+    private lateinit var mediaBrowser: MediaBrowserCompat
+    private val mediaBrowserConnectionCallback =
+        object : MediaBrowserCompat.ConnectionCallback() {
+            override fun onConnected() {
+                MediaControllerCompat.setMediaController(
+                    this@MainActivity, MediaControllerCompat(this@MainActivity, mediaBrowser.sessionToken))
+            }
+        }
+
     // Only MainActivity (a long-lived, single Activity) can host this launcher and reliably get
     // a result back -- the menu dialog that actually requests a deletion is a bottom sheet that
     // closes itself the instant any option is clicked (see MenuDialogFragment.onClick), so by the
@@ -88,6 +112,10 @@ class MainActivity : AppCompatActivity() {
         val binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         setupEdgeToEdge(binding.root)
+
+        mediaBrowser =
+            MediaBrowserCompat(
+                this, ComponentName(this, AuxioService::class.java), mediaBrowserConnectionCallback, null)
 
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -112,6 +140,13 @@ class MainActivity : AppCompatActivity() {
                         if (songs == null) return@collect
                         musicModel.deleteConfirmation.consume()
                         showDeleteConfirmation(songs)
+                    }
+                }
+                launch {
+                    musicModel.organizePreview.flow.collect { plan ->
+                        if (plan == null) return@collect
+                        musicModel.organizePreview.consume()
+                        showOrganizePreview(plan)
                     }
                 }
             }
@@ -145,6 +180,20 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        mediaBrowser.connect()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // Give up the foreground-window media-key claim as soon as this Activity itself stops
+        // being the foreground window, rather than leaving a stale controller registered -- see
+        // mediaBrowserConnectionCallback's doc comment for why this exists at all.
+        MediaControllerCompat.setMediaController(this, null)
+        mediaBrowser.disconnect()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         startIntentAction(intent)
@@ -161,6 +210,49 @@ class MainActivity : AppCompatActivity() {
                 )
             )
             .setPositiveButton(R.string.lbl_delete) { _, _ -> musicModel.confirmDeleteSongs(songs) }
+            .setNegativeButton(R.string.lbl_cancel, null)
+            .show()
+    }
+
+    /** See [MusicViewModel.organizePreview]'s doc comment for why this always runs. */
+    private fun showOrganizePreview(plan: LibraryOrganizer.Plan) {
+        if (plan.moves.isEmpty()) {
+            // Nothing to move isn't necessarily a failure -- it's also what a library that
+            // already matches this folder structure looks like (see LibraryOrganizer.plan's own
+            // doc comment on alreadyOrganizedCount).
+            showToast(
+                if (plan.alreadyOrganizedCount > 0) {
+                    R.string.msg_organize_already_done
+                } else {
+                    R.string.err_organize_failed
+                })
+            return
+        }
+        val body = buildString {
+            append(getString(R.string.fmt_organize_info, getPlural(R.plurals.fmt_song_count, plan.moves.size)))
+            if (plan.alreadyOrganizedCount > 0) {
+                append("\n\n")
+                append(getString(R.string.fmt_organize_already_organized, plan.alreadyOrganizedCount))
+            }
+            if (plan.skipped.isNotEmpty()) {
+                append("\n\n")
+                append(getString(R.string.fmt_organize_skipped, plan.skipped.size))
+            }
+            append("\n\n")
+            plan.moves.take(MAX_ORGANIZE_PREVIEW_LINES).forEach { move ->
+                append(getString(R.string.fmt_organize_preview_entry, move.oldDisplayPath, move.newDisplayPath))
+                append("\n\n")
+            }
+            if (plan.moves.size > MAX_ORGANIZE_PREVIEW_LINES) {
+                append(getString(R.string.fmt_organize_preview_more, plan.moves.size - MAX_ORGANIZE_PREVIEW_LINES))
+            }
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.lbl_confirm_organize)
+            .setMessage(body.trim())
+            .setPositiveButton(R.string.lbl_organize) { _, _ ->
+                musicModel.confirmOrganizeLibrary(plan.moves)
+            }
             .setNegativeButton(R.string.lbl_cancel, null)
             .show()
     }
@@ -231,5 +323,6 @@ class MainActivity : AppCompatActivity() {
 
     private companion object {
         const val KEY_INTENT_USED = BuildConfig.APPLICATION_ID + ".key.FILE_INTENT_USED"
+        const val MAX_ORGANIZE_PREVIEW_LINES = 50
     }
 }

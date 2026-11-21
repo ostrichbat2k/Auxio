@@ -36,7 +36,7 @@ import org.oxycblt.musikr.tag.Date
 import org.oxycblt.musikr.util.correctWhitespace
 import org.oxycblt.musikr.util.splitEscaped
 
-@Database(entities = [CachedFileData::class], version = 71, exportSchema = false)
+@Database(entities = [CachedFileData::class], version = 72, exportSchema = false)
 internal abstract class CacheDatabase : RoomDatabase() {
     abstract fun readDao(): CacheReadDao
 
@@ -97,6 +97,7 @@ internal data class CachedFileData(
     val track: Int?,
     val disc: Int?,
     val subtitle: String?,
+    val lyrics: String?,
     val date: Date?,
     val albumMusicBrainzId: String?,
     val albumName: String?,
