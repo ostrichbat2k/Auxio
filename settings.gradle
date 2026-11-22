@@ -16,6 +16,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // libusbdac, published from github.com/ostrichbat2k/libusbdac release tags.
+        maven { url 'https://jitpack.io' }
     }
 }
 
@@ -24,4 +26,3 @@ includeMedia3.execute(file('media'))
 rootProject.name = "Auxio"
 include ':app'
 include ':musikr'
-include ':libusbdac'

@@ -3,11 +3,10 @@
 # what the real compiler sees) over one native module's own source files.
 #
 # Usage: tools/run-clang-tidy.sh <module-dir> [extra clang-tidy args...]
-#   tools/run-clang-tidy.sh libusbdac
 #   tools/run-clang-tidy.sh musikr
 #
 # Requires a prior debug native build of that module (so a compile_commands.json exists
-# under <module-dir>/.cxx/Debug/*/arm64-v8a/) -- e.g. `./gradlew :libusbdac:externalNativeBuildDebug`.
+# under <module-dir>/.cxx/Debug/*/arm64-v8a/) -- e.g. `./gradlew :musikr:externalNativeBuildDebug`.
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
