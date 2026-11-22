@@ -181,7 +181,7 @@ constructor(
     private var bytesPerSample = 2
 
     override fun onConfigure(
-        inputAudioFormat: AudioProcessor.AudioFormat
+        inputAudioFormat: AudioProcessor.AudioFormat,
     ): AudioProcessor.AudioFormat {
         val bytes =
             when (inputAudioFormat.encoding) {

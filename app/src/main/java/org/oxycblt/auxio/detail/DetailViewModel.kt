@@ -252,7 +252,7 @@ constructor(
                 Show.SongArtistDecision(song)
             } else {
                 Show.ArtistDetails(song.artists.first())
-            }
+            },
         )
 
     /**
@@ -267,7 +267,7 @@ constructor(
                 Show.AlbumArtistDecision(album)
             } else {
                 Show.ArtistDetails(album.artists.first())
-            }
+            },
         )
 
     /**
@@ -526,7 +526,7 @@ constructor(
                 SongProperty(
                     R.string.lbl_sample_rate,
                     SongProperty.Value.SampleRate(song.sampleRateHz),
-                )
+                ),
             )
             // 0 means the format has no fixed per-sample depth (e.g. a lossy codec) -- see
             // Song.bitDepth's own doc comment -- so there's nothing meaningful to show.
