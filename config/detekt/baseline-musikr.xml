@@ -30,9 +30,6 @@
     <ID>LongMethod:SAF.kt$SAF$private fun CoroutineScope.exploreDirectoryImpl( rootUri: Uri, treeDocumentId: String, relativePath: Path, parent: Deferred&lt;Directory>?, exclude: Set&lt;Path>, files: Channel&lt;File>, ): Deferred&lt;Result&lt;Unit>></ID>
     <ID>LongMethod:TagInterpreter.kt$TagInterpreterImpl$override fun interpret(song: RawSong): PreSong</ID>
     <ID>LongParameterList:SAF.kt$SAF$( rootUri: Uri, treeDocumentId: String, relativePath: Path, parent: Deferred&lt;Directory>?, exclude: Set&lt;Path>, files: Channel&lt;File>, )</ID>
-    <ID>LongParameterList:TagFieldsTest.kt$TagFieldsTest$( id3v2Tags: Map&lt;String, List&lt;String>> = emptyMap(), xiphTags: Map&lt;String, List&lt;String>> = emptyMap(), mp4Tags: Map&lt;String, List&lt;String>> = emptyMap(), cover: ByteArray? = null, durationMs: Long = 1000, bitrateKbps: Int = 320, sampleRateHz: Int = 44100, mimeType: String = "audio/mpeg", )</ID>
-    <ID>LongParameterList:TagParserTest.kt$TagParserTest$( id3v2Tags: Map&lt;String, List&lt;String>> = emptyMap(), xiphTags: Map&lt;String, List&lt;String>> = emptyMap(), mp4Tags: Map&lt;String, List&lt;String>> = emptyMap(), cover: ByteArray? = null, durationMs: Long = 1000, bitrateKbps: Int = 320, sampleRateHz: Int = 44100, mimeType: String = "audio/mpeg", )</ID>
-    <ID>LongParameterList:TagParsingEdgeCasesTest.kt$TagParsingEdgeCasesTest$( id3v2Tags: Map&lt;String, List&lt;String>> = emptyMap(), xiphTags: Map&lt;String, List&lt;String>> = emptyMap(), mp4Tags: Map&lt;String, List&lt;String>> = emptyMap(), cover: ByteArray? = null, durationMs: Long = 1000, bitrateKbps: Int = 320, sampleRateHz: Int = 44100, mimeType: String = "audio/mpeg", )</ID>
     <ID>LoopWithTooManyJumpStatements:M3U.kt$M3UImpl$while</ID>
     <ID>LoopWithTooManyJumpStatements:SAF.kt$SAF$while</ID>
     <ID>MagicNumber:AlbumImpl.kt$AlbumImpl$31</ID>
@@ -110,7 +107,7 @@
     <ID>ReturnCount:Format.kt$Format.Companion$internal fun infer(containerMimeType: String, codecMimeType: String): Format</ID>
     <ID>ReturnCount:ID3.kt$private fun String.parseId3v2Genre(): List&lt;String>?</ID>
     <ID>ReturnCount:Location.kt$Location.Unopened$fun open(context: Context): Opened?</ID>
-    <ID>ReturnCount:MediaStorePathInterpreter.kt$VolumeMediaStorePathInterpreter.Factory$override fun createSelector( paths: List&lt;Path> ): MediaStorePathInterpreter.Factory.Selector?</ID>
+    <ID>ReturnCount:MediaStorePathInterpreter.kt$VolumeMediaStorePathInterpreter.Factory$override fun createSelector( paths: List&lt;Path>, ): MediaStorePathInterpreter.Factory.Selector?</ID>
     <ID>ReturnCount:Music.kt$Music.UID.Companion$fun fromString(uid: String): UID?</ID>
     <ID>ReturnCount:MusicGraph.kt$MusicGraphBuilderImpl$private fun simplifyAlbumCluster(cluster: Collection&lt;AlbumVertex>)</ID>
     <ID>ReturnCount:Name.kt$Token$override fun compareTo(other: Token): Int</ID>
